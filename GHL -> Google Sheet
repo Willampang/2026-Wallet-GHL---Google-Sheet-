@@ -1,0 +1,579 @@
+// ========================================
+// CONFIGURATION
+// ========================================
+const CONFIG = {
+  SPREADSHEET_ID: '1b5On_VvQF-6i634aXhSHwjMIY_m-f2SLhPnBMfM1cJo',
+  SHEET_NAME: 'Orders',
+
+  PRODUCTS: {
+    // First Page Products (A, B, C)
+    '68e517b495c688251fef4ede': { name: 'A款（丰盛款）', price: 496 },
+    '68e51814ea6f521f911e9622': { name: 'B款（聚财款）', price: 496 },
+    '68e517dd9b16bb4bdb99280e': { name: 'C款（富豪款）', price: 397 },
+    
+    // Second Page Bundle Products (D, E, F, G, H)
+    '68e880998a4f94fb8ae3d52f': { name: 'D款（带财款x1）', price: 234 },
+    '68e880b566345fab13b6d775': { name: 'E款（吸金款x1）', price: 234 },
+    '68e880746cc254b97272479f': { name: 'F款（带财款x1+吸金款x1）', price: 374 },
+    '68e884338a4f946ffce4f834': { name: 'G款（带财款x2）', price: 374 },
+    '68e8846066345f7038b8092c': { name: 'H款（吸金款x2）', price: 374 }
+  },
+
+  AUTO_CREATE_SHEET: true,
+  MAX_PRODUCTS: 10,
+  MERGE_TIMEOUT_MINUTES: 30, // Orders within 30 minutes will be merged
+  USE_SCRIPT_LOCK: true, // Prevent concurrent writes
+  LOCK_TIMEOUT_SECONDS: 30
+};
+
+// ========================================
+// HEALTH CHECK
+// ========================================
+function doGet(e) {
+  return ContentService.createTextOutput(
+    JSON.stringify({
+      status: 'online',
+      version: '8.5 - support 8 products (A-H款)',
+      query: e.parameter,
+      products: Object.keys(CONFIG.PRODUCTS).length
+    })
+  ).setMimeType(ContentService.MimeType.JSON);
+}
+
+// ========================================
+// MAIN WEBHOOK HANDLER
+// ========================================
+function doPost(e) {
+  // Acquire lock to prevent concurrent processing
+  let lock = null;
+  if (CONFIG.USE_SCRIPT_LOCK) {
+    lock = LockService.getScriptLock();
+    try {
+      lock.waitLock(CONFIG.LOCK_TIMEOUT_SECONDS * 1000);
+      Logger.log('✓ Lock acquired');
+    } catch (lockErr) {
+      Logger.log('✗ Could not acquire lock: ' + lockErr.toString());
+      return ContentService.createTextOutput(
+        JSON.stringify({ status: 'error', message: 'System busy, please retry' })
+      ).setMimeType(ContentService.MimeType.JSON);
+    }
+  }
+  
+  let rawBody = e.postData && e.postData.contents ? e.postData.contents : '';
+  let data = {};
+  try {
+    data = JSON.parse(rawBody);
+  } catch (err) {
+    data = e.parameter || {};
+  }
+
+  try {
+    const order = extractOrderData(data);
+    const pricing = calculatePricing(order, data);
+
+    const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+    let sheet = ss.getSheetByName(CONFIG.SHEET_NAME);
+    if (!sheet && CONFIG.AUTO_CREATE_SHEET) {
+      sheet = ss.insertSheet(CONFIG.SHEET_NAME);
+      setupHeaders(sheet);
+    }
+
+    const debugText =
+      'RAW:\n' +
+      rawBody +
+      '\n\nORDER:\n' +
+      JSON.stringify(order, null, 2) +
+      '\n\nPRICING:\n' +
+      JSON.stringify(pricing, null, 2);
+
+    // Force flush to ensure any pending writes are complete
+    SpreadsheetApp.flush();
+    
+    // Try to find existing order
+    const existingRow = findExistingOrder(sheet, order.email, order.phone);
+    
+    if (existingRow) {
+      // UPDATE existing order
+      Logger.log('Found existing order at row: ' + existingRow.rowIndex);
+      updateExistingOrder(sheet, existingRow, order, pricing, debugText);
+      
+      // Release lock before returning
+      if (lock) lock.releaseLock();
+      
+      return ContentService.createTextOutput(
+        JSON.stringify({
+          status: 'success',
+          action: 'updated',
+          orderId: existingRow.orderId,
+          mainProduct: existingRow.newMainProduct,
+          total: existingRow.newTotal,
+          productsFound: order.products.length
+        })
+      ).setMimeType(ContentService.MimeType.JSON);
+      
+    } else {
+      // CREATE new order
+      Logger.log('Creating new order');
+      const orderId = generateOrderId();
+      
+      const row = [
+        new Date(),
+        orderId,
+        order.name,
+        order.email,
+        order.phone,
+        order.address,
+        order.city,
+        order.state,
+        order.postcode,
+        pricing.mainProductName,
+        pricing.totalQty,
+        pricing.items,
+        'RM' + pricing.totalPrice.toFixed(2),
+        'Pending',
+        debugText
+      ];
+
+      sheet.appendRow(row);
+      SpreadsheetApp.flush(); // Ensure write is complete
+      sheet.autoResizeColumns(1, sheet.getLastColumn());
+
+      // Release lock before returning
+      if (lock) lock.releaseLock();
+
+      return ContentService.createTextOutput(
+        JSON.stringify({
+          status: 'success',
+          action: 'created',
+          orderId: orderId,
+          mainProduct: pricing.mainProductName,
+          total: pricing.totalPrice,
+          productsFound: order.products.length
+        })
+      ).setMimeType(ContentService.MimeType.JSON);
+    }
+
+  } catch (err) {
+    // Release lock on error
+    if (lock) {
+      try { lock.releaseLock(); } catch (e) {}
+    }
+    
+    const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+    let sheet = ss.getSheetByName(CONFIG.SHEET_NAME);
+    if (sheet) {
+      sheet.appendRow([new Date(), 'ERROR', '', '', '', '', '', '', '', '', '', '', '', '❌ ' + err.toString() + '\n\nRAW: ' + rawBody]);
+    }
+    return ContentService.createTextOutput(
+      JSON.stringify({ status: 'error', message: err.toString() })
+    ).setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+// ========================================
+// FIND EXISTING ORDER
+// ========================================
+function findExistingOrder(sheet, email, phone) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return null; // No data rows
+  
+  const emailCol = 4; // Column D
+  const phoneCol = 5; // Column E
+  const timestampCol = 1; // Column A
+  const orderIdCol = 2; // Column B
+  
+  const emailValues = sheet.getRange(2, emailCol, lastRow - 1, 1).getValues();
+  const phoneValues = sheet.getRange(2, phoneCol, lastRow - 1, 1).getValues();
+  const timestamps = sheet.getRange(2, timestampCol, lastRow - 1, 1).getValues();
+  const orderIds = sheet.getRange(2, orderIdCol, lastRow - 1, 1).getValues();
+  
+  const now = new Date();
+  const cutoffTime = new Date(now.getTime() - CONFIG.MERGE_TIMEOUT_MINUTES * 60 * 1000);
+  
+  // Clean phone number more aggressively
+  const cleanPhone = String(phone).trim()
+    .replace(/\D/g, '') // Remove all non-digits
+    .replace(/^60/, '') // Remove leading country code if present
+    .replace(/^0/, ''); // Remove leading zero if present
+  
+  Logger.log('Looking for: ' + email + ' | Phone: ' + cleanPhone);
+  
+  // Search from bottom to top (most recent first)
+  for (let i = lastRow - 2; i >= 0; i--) {
+    const rowEmail = String(emailValues[i][0]).trim().toLowerCase();
+    const rowPhoneRaw = String(phoneValues[i][0]).trim();
+    const rowPhone = rowPhoneRaw
+      .replace(/\D/g, '')
+      .replace(/^60/, '')
+      .replace(/^0/, '');
+    const rowTimestamp = new Date(timestamps[i][0]);
+    
+    Logger.log('Row ' + (i+2) + ': ' + rowEmail + ' | Phone: ' + rowPhone + ' | Time: ' + rowTimestamp);
+    
+    // Check if email and phone match AND within timeout window
+    const emailMatch = rowEmail === email.toLowerCase();
+    const phoneMatch = rowPhone === cleanPhone || rowPhoneRaw.indexOf(cleanPhone) !== -1 || cleanPhone.indexOf(rowPhone) !== -1;
+    const timeMatch = rowTimestamp > cutoffTime;
+    
+    Logger.log('Match check - Email: ' + emailMatch + ', Phone: ' + phoneMatch + ', Time: ' + timeMatch);
+    
+    if (emailMatch && phoneMatch && timeMatch) {
+      Logger.log('✓ MATCH FOUND at row ' + (i + 2));
+      return {
+        rowIndex: i + 2, // +2 because array is 0-based and sheet has header
+        orderId: orderIds[i][0],
+        timestamp: rowTimestamp
+      };
+    }
+  }
+  
+  Logger.log('✗ No match found');
+  return null;
+}
+
+// ========================================
+// UPDATE EXISTING ORDER
+// ========================================
+function updateExistingOrder(sheet, existingRow, newOrder, newPricing, debugText) {
+  const rowIndex = existingRow.rowIndex;
+  
+  // Get existing values
+  const mainProductCol = 10;
+  const qtyCol = 11;
+  const itemsCol = 12;
+  const priceCol = 13;
+  const debugCol = 15;
+  
+  const existingMainProduct = sheet.getRange(rowIndex, mainProductCol).getValue();
+  const existingQty = sheet.getRange(rowIndex, qtyCol).getValue();
+  const existingItems = sheet.getRange(rowIndex, itemsCol).getValue();
+  const existingPrice = sheet.getRange(rowIndex, priceCol).getValue();
+  const existingDebug = sheet.getRange(rowIndex, debugCol).getValue();
+  
+  // Parse existing products
+  const existingProductMap = parseExistingProducts(existingItems);
+  
+  // Merge with new products
+  for (let i = 0; i < newOrder.products.length; i++) {
+    const p = newOrder.products[i];
+    const info = CONFIG.PRODUCTS[p.id];
+    if (info) {
+      if (existingProductMap[p.id]) {
+        existingProductMap[p.id].qty += p.qty;
+      } else {
+        existingProductMap[p.id] = { name: info.name, qty: p.qty, price: info.price };
+      }
+    }
+  }
+  
+  // Recalculate totals
+  let newTotal = 0;
+  let newTotalQty = 0;
+  let newItems = [];
+  let newMainProducts = [];
+  
+  for (const id in existingProductMap) {
+    const prod = existingProductMap[id];
+    newTotal += prod.price * prod.qty;
+    newTotalQty += prod.qty;
+    newItems.push(prod.name + ' x' + prod.qty);
+    newMainProducts.push(prod.name);
+  }
+  
+  const newMainProduct = newMainProducts.length > 1 ? newMainProducts.join(' + ') : newMainProducts[0];
+  const newItemsStr = newItems.join(' + ');
+  
+  // Update the row
+  sheet.getRange(rowIndex, mainProductCol).setValue(newMainProduct);
+  sheet.getRange(rowIndex, qtyCol).setValue(newTotalQty);
+  sheet.getRange(rowIndex, itemsCol).setValue(newItemsStr);
+  sheet.getRange(rowIndex, priceCol).setValue('RM' + newTotal.toFixed(2));
+  sheet.getRange(rowIndex, debugCol).setValue(existingDebug + '\n\n--- MERGED ---\n' + debugText);
+  
+  // Update timestamp to latest
+  sheet.getRange(rowIndex, 1).setValue(new Date());
+  
+  // Store values for response
+  existingRow.newMainProduct = newMainProduct;
+  existingRow.newTotal = newTotal;
+  
+  Logger.log('Updated order: ' + newMainProduct + ' = RM' + newTotal);
+}
+
+// ========================================
+// PARSE EXISTING PRODUCTS
+// ========================================
+function parseExistingProducts(itemsStr) {
+  const productMap = {};
+  if (!itemsStr) return productMap;
+  
+  const items = String(itemsStr).split('+').map(function(s) { return s.trim(); });
+  
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    
+    // Try to extract product name and quantity
+    for (const id in CONFIG.PRODUCTS) {
+      const info = CONFIG.PRODUCTS[id];
+      
+      if (item.indexOf(info.name) !== -1) {
+        // Try to find quantity pattern
+        const qtyMatch = item.match(/x\s*([0-9]+)/i);
+        const qty = qtyMatch ? parseInt(qtyMatch[1]) : 1;
+        
+        productMap[id] = { name: info.name, qty: qty, price: info.price };
+        break;
+      }
+    }
+  }
+  
+  return productMap;
+}
+
+// ========================================
+// EXTRACT ORDER DATA
+// ========================================
+function extractOrderData(data) {
+  const contact = data.contact || {};
+  const custom = data.customData || {};
+
+  const getField = (n) => data[n] || contact[n] || custom[n] || '';
+
+  return {
+    name: getField('full_name') || getField('name') || custom['1'] || 'N/A',
+    email: getField('email') || custom['2'] || 'N/A',
+    phone: getField('phone') || custom['3'] || 'N/A',
+    address: getField('address') || getField('full_address') || custom['4'] || 'N/A',
+    city: getField('city') || custom['5'] || 'N/A',
+    state: getField('state') || custom['7'] || 'N/A',
+    postcode: getField('postal_code') || custom['8'] || 'N/A',
+    products: extractProducts(data)
+  };
+}
+
+// ========================================
+// EXTRACT PRODUCTS
+// ========================================
+function extractProducts(data) {
+  let products = [];
+  const order = data.order || {};
+  const custom = data.customData || {};
+
+  // METHOD 0: Parse from Order Summary field
+  Logger.log('Method 0: Checking for Order Summary...');
+  const orderSummary = custom.order_summary || custom['Order Summary'] || custom.orderSummary || 
+                       data.order_summary || data['Order Summary'] || data.orderSummary;
+  
+  if (orderSummary && typeof orderSummary === 'string') {
+    Logger.log('Found Order Summary: ' + orderSummary);
+    
+    for (const id in CONFIG.PRODUCTS) {
+      const info = CONFIG.PRODUCTS[id];
+      
+      // Try multiple regex patterns to find product and quantity
+      const nameEscaped = info.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const nameNoParens = info.name.replace(/[（）]/g, '');
+      const namePrefix = info.name.split('（')[0];
+      
+      const patterns = [
+        nameEscaped + '[:\\s]*([0-9]+)',
+        nameNoParens + '[:\\s]*([0-9]+)',
+        namePrefix + '[:\\s]*([0-9]+)'
+      ];
+      
+      for (let i = 0; i < patterns.length; i++) {
+        try {
+          const regex = new RegExp(patterns[i], 'i');
+          const match = orderSummary.match(regex);
+          
+          if (match && match[1]) {
+            const qty = parseInt(match[1]);
+            if (!isNaN(qty) && qty > 0) {
+              products.push({ id: id, qty: qty });
+              Logger.log('Found from Order Summary: ' + info.name + ' x' + qty);
+              break;
+            }
+          }
+        } catch (e) {
+          Logger.log('Regex error for pattern ' + i + ': ' + e.toString());
+        }
+      }
+    }
+  }
+
+  // METHOD 1: Parse numbered product fields
+  if (products.length === 0) {
+    Logger.log('Method 1: Checking numbered fields...');
+    
+    for (let i = 1; i <= CONFIG.MAX_PRODUCTS; i++) {
+      const productId = custom['product_id_' + i];
+      let qtyValue = custom['qty_' + i];
+      
+      if (qtyValue && typeof qtyValue === 'object' && qtyValue.quantity) {
+        qtyValue = qtyValue.quantity;
+      }
+      
+      if (qtyValue) {
+        qtyValue = String(qtyValue).trim();
+      }
+      
+      if (productId && CONFIG.PRODUCTS[productId]) {
+        const quantity = parseInt(qtyValue || 0);
+        
+        if (!isNaN(quantity) && quantity > 0) {
+          products.push({ id: productId, qty: quantity });
+          Logger.log('Found product ' + i + ': x' + quantity);
+        }
+      }
+    }
+  }
+
+  // METHOD 2: Check for checkbox patterns
+  if (products.length === 0) {
+    Logger.log('Method 2: Checking checkboxes...');
+    
+    const allData = Object.assign({}, data, custom);
+    
+    for (const id in CONFIG.PRODUCTS) {
+      const info = CONFIG.PRODUCTS[id];
+      const checkboxValue = allData[info.name] || data[info.name] || custom[info.name];
+      
+      if (checkboxValue) {
+        let qty = 1;
+        
+        const possibleQtyFields = [
+          info.name + '_quantity',
+          info.name + ' quantity',
+          info.name + '_qty'
+        ];
+        
+        for (let j = 0; j < possibleQtyFields.length; j++) {
+          const qtyField = possibleQtyFields[j];
+          const qtyVal = allData[qtyField] || data[qtyField] || custom[qtyField];
+          if (qtyVal && !isNaN(parseInt(qtyVal))) {
+            qty = parseInt(qtyVal);
+            break;
+          }
+        }
+        
+        products.push({ id: id, qty: qty });
+        Logger.log('Found checkbox: ' + info.name + ' x' + qty);
+      }
+    }
+  }
+
+  // METHOD 3: Parse from order.description
+  if (products.length === 0 && order.description && typeof order.description === 'string') {
+    Logger.log('Method 3: Parsing description...');
+    const desc = order.description;
+    
+    for (const id in CONFIG.PRODUCTS) {
+      const info = CONFIG.PRODUCTS[id];
+      
+      if (desc.indexOf(info.name) !== -1) {
+        let qty = 1;
+        
+        // Try to find quantity pattern
+        const qtyPatterns = [
+          'x\\s*([0-9]+)',
+          'X\\s*([0-9]+)',
+          '×\\s*([0-9]+)'
+        ];
+        
+        for (let i = 0; i < qtyPatterns.length; i++) {
+          try {
+            const regex = new RegExp(qtyPatterns[i], 'i');
+            const match = desc.match(regex);
+            if (match && match[1]) {
+              qty = parseInt(match[1]);
+              break;
+            }
+          } catch (e) {
+            // Skip regex errors
+          }
+        }
+        
+        if (!products.find(function(p) { return p.id === id; })) {
+          products.push({ id: id, qty: qty });
+          Logger.log('Found in description: ' + info.name + ' x' + qty);
+        }
+      }
+    }
+  }
+
+  // METHOD 4: Single product fallback
+  if (products.length === 0 && custom.product_id && CONFIG.PRODUCTS[custom.product_id]) {
+    Logger.log('Method 4: Single product...');
+    products.push({ 
+      id: custom.product_id, 
+      qty: parseInt(custom.qty || 1) 
+    });
+  }
+
+  // METHOD 5: Fallback to internalProductId
+  if (products.length === 0 && order.internalProductId && CONFIG.PRODUCTS[order.internalProductId]) {
+    Logger.log('Method 5: Using internalProductId...');
+    products.push({ 
+      id: order.internalProductId, 
+      qty: parseInt(order.quantity || 1) 
+    });
+  }
+
+  Logger.log('Total products: ' + products.length);
+  return products;
+}
+
+// ========================================
+// CALCULATE PRICING
+// ========================================
+function calculatePricing(order, data) {
+  let total = 0;
+  let items = [];
+  let names = [];
+  let totalQty = 0;
+
+  for (let i = 0; i < order.products.length; i++) {
+    const p = order.products[i];
+    const info = CONFIG.PRODUCTS[p.id];
+    if (info) {
+      total += info.price * p.qty;
+      totalQty += p.qty;
+      names.push(info.name);
+      items.push(info.name + ' x' + p.qty);
+    }
+  }
+
+  const mainProductName = names.length > 1 ? names.join(' + ') : (names[0] || 'N/A');
+  return { 
+    totalPrice: total, 
+    mainProductName: mainProductName, 
+    items: items.join(' + '), 
+    totalQty: totalQty 
+  };
+}
+
+// ========================================
+// SETUP HEADERS
+// ========================================
+function setupHeaders(sheet) {
+  const headers = [
+    'Timestamp', 'Order ID', 'Name', 'Email', 'Phone',
+    'Address', 'City', 'State', 'Postcode',
+    'Main Product', 'Quantity', 'Order Summary',
+    'Original Price', 'Status', 'Debug Info'
+  ];
+  sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  sheet.getRange(1, 1, 1, headers.length)
+    .setFontWeight('bold').setBackground('#4285f4').setFontColor('#fff');
+  sheet.setFrozenRows(1);
+}
+
+// ========================================
+// GENERATE ORDER ID
+// ========================================
+function generateOrderId() {
+  const now = new Date();
+  const dateStr = Utilities.formatDate(now, 'GMT+8', 'yyyyMMdd');
+  const rand = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
+  return 'ORD-' + dateStr + '-' + rand;
+}
