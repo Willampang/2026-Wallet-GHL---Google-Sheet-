@@ -1,9 +1,7 @@
-// ========================================
-// CONFIGURATION
-// ========================================
 const CONFIG = {
   SPREADSHEET_ID: '1b5On_VvQF-6i634aXhSHwjMIY_m-f2SLhPnBMfM1cJo',
   SHEET_NAME: 'Orders',
+  FORM_RESPONSES_SHEET: 'Form responses 1', // Name of your form responses sheet
 
   PRODUCTS: {
     // First Page Products (A, B, C)
@@ -26,23 +24,17 @@ const CONFIG = {
   LOCK_TIMEOUT_SECONDS: 30
 };
 
-// ========================================
-// HEALTH CHECK
-// ========================================
 function doGet(e) {
   return ContentService.createTextOutput(
     JSON.stringify({
       status: 'online',
-      version: '8.5 - support 8 products (A-H款)',
+      version: '8.8 - auto address detection from form',
       query: e.parameter,
       products: Object.keys(CONFIG.PRODUCTS).length
     })
   ).setMimeType(ContentService.MimeType.JSON);
 }
 
-// ========================================
-// MAIN WEBHOOK HANDLER
-// ========================================
 function doPost(e) {
   // Acquire lock to prevent concurrent processing
   let lock = null;
@@ -78,14 +70,6 @@ function doPost(e) {
       setupHeaders(sheet);
     }
 
-    const debugText =
-      'RAW:\n' +
-      rawBody +
-      '\n\nORDER:\n' +
-      JSON.stringify(order, null, 2) +
-      '\n\nPRICING:\n' +
-      JSON.stringify(pricing, null, 2);
-
     // Force flush to ensure any pending writes are complete
     SpreadsheetApp.flush();
     
@@ -95,7 +79,7 @@ function doPost(e) {
     if (existingRow) {
       // UPDATE existing order
       Logger.log('Found existing order at row: ' + existingRow.rowIndex);
-      updateExistingOrder(sheet, existingRow, order, pricing, debugText);
+      updateExistingOrder(sheet, existingRow, order, pricing);
       
       // Release lock before returning
       if (lock) lock.releaseLock();
@@ -116,6 +100,19 @@ function doPost(e) {
       Logger.log('Creating new order');
       const orderId = generateOrderId();
       
+      // Check if address is missing and try to get from Form Responses
+      if (order.address === 'N/A' || !order.address || order.address.trim() === '' || order.address === 'dede') {
+        Logger.log('Address missing, checking Form Responses...');
+        const formAddress = getAddressFromForm(ss, order.email, order.phone);
+        if (formAddress) {
+          order.address = formAddress.address;
+          order.city = formAddress.city;
+          order.state = formAddress.state;
+          order.postcode = formAddress.postcode;
+          Logger.log('✓ Address found and applied from Form Responses');
+        }
+      }
+      
       const row = [
         new Date(),
         orderId,
@@ -130,8 +127,7 @@ function doPost(e) {
         pricing.totalQty,
         pricing.items,
         'RM' + pricing.totalPrice.toFixed(2),
-        'Pending',
-        debugText
+        'Pending'
       ];
 
       sheet.appendRow(row);
@@ -162,7 +158,7 @@ function doPost(e) {
     const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
     let sheet = ss.getSheetByName(CONFIG.SHEET_NAME);
     if (sheet) {
-      sheet.appendRow([new Date(), 'ERROR', '', '', '', '', '', '', '', '', '', '', '', '❌ ' + err.toString() + '\n\nRAW: ' + rawBody]);
+      sheet.appendRow([new Date(), 'ERROR', '', '', '', '', '', '', '', '', '', '', '', '❌ ' + err.toString()]);
     }
     return ContentService.createTextOutput(
       JSON.stringify({ status: 'error', message: err.toString() })
@@ -170,17 +166,216 @@ function doPost(e) {
   }
 }
 
-// ========================================
-// FIND EXISTING ORDER
-// ========================================
+function updateAddressesFromForm() {
+  const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  const ordersSheet = ss.getSheetByName(CONFIG.SHEET_NAME);
+  const formSheet = ss.getSheetByName(CONFIG.FORM_RESPONSES_SHEET);
+  
+  if (!ordersSheet || !formSheet) {
+    Logger.log('Sheet not found');
+    SpreadsheetApp.getUi().alert('Error: Orders or Form Responses sheet not found');
+    return;
+  }
+  
+  const lastOrderRow = ordersSheet.getLastRow();
+  if (lastOrderRow < 2) {
+    SpreadsheetApp.getUi().alert('No orders found to update');
+    return;
+  }
+  
+  // Get all orders data
+  const ordersData = ordersSheet.getRange(2, 1, lastOrderRow - 1, 14).getValues();
+  
+  let updatedCount = 0;
+  
+  for (let i = 0; i < ordersData.length; i++) {
+    const rowIndex = i + 2;
+    const email = String(ordersData[i][3]).trim(); // Column D
+    const phone = String(ordersData[i][4]).trim(); // Column E
+    const currentAddress = String(ordersData[i][5]).trim(); // Column F
+    
+    // Check if address is missing or N/A or "dede"
+    if (!currentAddress || currentAddress === 'N/A' || currentAddress === '' || currentAddress === 'dede') {
+      Logger.log('Row ' + rowIndex + ' missing address, checking form...');
+      
+      const formAddress = getAddressFromForm(ss, email, phone);
+      
+      if (formAddress) {
+        // Update the address columns
+        ordersSheet.getRange(rowIndex, 6).setValue(formAddress.address); // Address
+        ordersSheet.getRange(rowIndex, 7).setValue(formAddress.city); // City
+        ordersSheet.getRange(rowIndex, 8).setValue(formAddress.state); // State
+        ordersSheet.getRange(rowIndex, 9).setValue(formAddress.postcode); // Postcode
+        
+        updatedCount++;
+        Logger.log('✓ Updated address for row ' + rowIndex);
+      }
+    }
+  }
+  
+  SpreadsheetApp.flush();
+  Logger.log('Address update complete. Updated ' + updatedCount + ' orders.');
+  
+  // Show alert
+  SpreadsheetApp.getUi().alert('Address Update Complete', 
+    'Updated ' + updatedCount + ' orders with addresses from form responses.', 
+    SpreadsheetApp.getUi().ButtonSet.OK);
+}
+
+function onFormSubmit(e) {
+  try {
+    const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+    const ordersSheet = ss.getSheetByName(CONFIG.SHEET_NAME);
+    
+    if (!ordersSheet) return;
+    
+    // Get the submitted form data
+    const formResponse = e.values; // Array of form values    
+    const submittedEmail1 = String(formResponse[1] || '').trim().toLowerCase();
+    const submittedEmail2 = String(formResponse[3] || '').trim().toLowerCase();
+    const submittedPhone = String(formResponse[10] || '').trim();
+    const addressLine1 = String(formResponse[4] || '').trim();
+    const addressLine2 = String(formResponse[5] || '').trim();
+    const city = String(formResponse[6] || '').trim();
+    const state = String(formResponse[7] || '').trim();
+    const postcode = String(formResponse[9] || '').trim();
+    
+    // Combine address lines
+    let submittedAddress = addressLine1;
+    if (addressLine2 && addressLine2 !== 'N/A' && addressLine2 !== '') {
+      submittedAddress = submittedAddress + ', ' + addressLine2;
+    }
+    
+    if (!submittedAddress || submittedAddress === 'N/A') {
+      Logger.log('No valid address in form submission');
+      return;
+    }
+    
+    Logger.log('Form submitted - Auto-updating orders with address...');
+    Logger.log('Email: ' + submittedEmail1 + ' / ' + submittedEmail2);
+    Logger.log('Phone: ' + submittedPhone);
+    
+    // Search orders for matching email/phone
+    const lastOrderRow = ordersSheet.getLastRow();
+    if (lastOrderRow < 2) return;
+    
+    const ordersData = ordersSheet.getRange(2, 1, lastOrderRow - 1, 14).getValues();
+    
+    const cleanPhone = submittedPhone
+      .replace(/\D/g, '')
+      .replace(/^60/, '')
+      .replace(/^0/, '');
+    
+    let updatedCount = 0;
+    
+    for (let i = 0; i < ordersData.length; i++) {
+      const rowIndex = i + 2;
+      const orderEmail = String(ordersData[i][3]).trim().toLowerCase(); // Column D
+      const orderPhone = String(ordersData[i][4]).trim(); // Column E
+      const currentAddress = String(ordersData[i][5]).trim(); // Column F
+      
+      const cleanOrderPhone = orderPhone
+        .replace(/\D/g, '')
+        .replace(/^60/, '')
+        .replace(/^0/, '');
+      
+      const emailMatch = orderEmail === submittedEmail1 || orderEmail === submittedEmail2;
+      const phoneMatch = cleanOrderPhone === cleanPhone || cleanPhone.indexOf(cleanOrderPhone) !== -1;
+      
+      // Update if email/phone matches and address is missing or "dede"
+      if ((emailMatch || phoneMatch) && (!currentAddress || currentAddress === 'N/A' || currentAddress === '' || currentAddress === 'dede')) {
+        ordersSheet.getRange(rowIndex, 6).setValue(submittedAddress);
+        ordersSheet.getRange(rowIndex, 7).setValue(city);
+        ordersSheet.getRange(rowIndex, 8).setValue(state);
+        ordersSheet.getRange(rowIndex, 9).setValue(postcode);
+        
+        updatedCount++;
+        Logger.log('✓ Auto-updated row ' + rowIndex + ' for ' + orderEmail);
+      }
+    }
+    
+    SpreadsheetApp.flush();
+    Logger.log('✓ Form submission complete. Updated ' + updatedCount + ' order(s).');
+    
+  } catch (error) {
+    Logger.log('Error in onFormSubmit: ' + error.toString());
+  }
+}
+
+function getAddressFromForm(spreadsheet, email, phone) {
+  const formSheet = spreadsheet.getSheetByName(CONFIG.FORM_RESPONSES_SHEET);
+  
+  if (!formSheet) {
+    Logger.log('Form responses sheet not found');
+    return null;
+  }
+  
+  const lastRow = formSheet.getLastRow();
+  if (lastRow < 2) return null;
+  
+  // Get all form data
+  const formData = formSheet.getRange(2, 1, lastRow - 1, formSheet.getLastColumn()).getValues();
+  
+  // Clean the search criteria
+  const cleanEmail = String(email).trim().toLowerCase();
+  const cleanPhone = String(phone).trim()
+    .replace(/\D/g, '')
+    .replace(/^60/, '')
+    .replace(/^0/, '');
+  
+  Logger.log('Searching form for: ' + cleanEmail + ' | ' + cleanPhone);
+  
+  // Search from bottom to top (most recent first)
+  for (let i = formData.length - 1; i >= 0; i--) {
+    const formEmail1 = String(formData[i][1] || '').trim().toLowerCase(); // Column B
+    const formEmail2 = String(formData[i][3] || '').trim().toLowerCase(); // Column D
+    const formPhoneRaw = String(formData[i][10] || '').trim(); // Column K
+    const formPhone = formPhoneRaw
+      .replace(/\D/g, '')
+      .replace(/^60/, '')
+      .replace(/^0/, '');
+    
+    const emailMatch = formEmail1 === cleanEmail || formEmail2 === cleanEmail;
+    const phoneMatch = formPhone === cleanPhone || formPhoneRaw.indexOf(cleanPhone) !== -1 || cleanPhone.indexOf(formPhone) !== -1;
+    
+    if (emailMatch || phoneMatch) {
+      // Get address data from form
+      const addressLine1 = String(formData[i][4] || '').trim(); // Column E
+      const addressLine2 = String(formData[i][5] || '').trim(); // Column F
+      const city = String(formData[i][6] || '').trim(); // Column G
+      const state = String(formData[i][7] || '').trim(); // Column H
+      const postcode = String(formData[i][9] || '').trim(); // Column J
+      
+      // Combine address lines
+      let fullAddress = addressLine1;
+      if (addressLine2 && addressLine2 !== 'N/A' && addressLine2 !== '') {
+        fullAddress = fullAddress + ', ' + addressLine2;
+      }
+      
+      if (fullAddress && fullAddress !== 'N/A' && fullAddress !== '') {
+        Logger.log('✓ Found address: ' + fullAddress);
+        return {
+          address: fullAddress,
+          city: city || 'N/A',
+          state: state || 'N/A',
+          postcode: postcode || 'N/A'
+        };
+      }
+    }
+  }
+  
+  Logger.log('✗ No address found in form responses');
+  return null;
+}
+
 function findExistingOrder(sheet, email, phone) {
   const lastRow = sheet.getLastRow();
-  if (lastRow < 2) return null; // No data rows
+  if (lastRow < 2) return null;
   
-  const emailCol = 4; // Column D
-  const phoneCol = 5; // Column E
-  const timestampCol = 1; // Column A
-  const orderIdCol = 2; // Column B
+  const emailCol = 4;
+  const phoneCol = 5;
+  const timestampCol = 1;
+  const orderIdCol = 2;
   
   const emailValues = sheet.getRange(2, emailCol, lastRow - 1, 1).getValues();
   const phoneValues = sheet.getRange(2, phoneCol, lastRow - 1, 1).getValues();
@@ -190,13 +385,10 @@ function findExistingOrder(sheet, email, phone) {
   const now = new Date();
   const cutoffTime = new Date(now.getTime() - CONFIG.MERGE_TIMEOUT_MINUTES * 60 * 1000);
   
-  // Clean phone number more aggressively
   const cleanPhone = String(phone).trim()
-    .replace(/\D/g, '') // Remove all non-digits
-    .replace(/^60/, '') // Remove leading country code if present
-    .replace(/^0/, ''); // Remove leading zero if present
-  
-  Logger.log('Looking for: ' + email + ' | Phone: ' + cleanPhone);
+    .replace(/\D/g, '')
+    .replace(/^60/, '')
+    .replace(/^0/, '');
   
   // Search from bottom to top (most recent first)
   for (let i = lastRow - 2; i >= 0; i--) {
@@ -208,52 +400,50 @@ function findExistingOrder(sheet, email, phone) {
       .replace(/^0/, '');
     const rowTimestamp = new Date(timestamps[i][0]);
     
-    Logger.log('Row ' + (i+2) + ': ' + rowEmail + ' | Phone: ' + rowPhone + ' | Time: ' + rowTimestamp);
-    
-    // Check if email and phone match AND within timeout window
     const emailMatch = rowEmail === email.toLowerCase();
     const phoneMatch = rowPhone === cleanPhone || rowPhoneRaw.indexOf(cleanPhone) !== -1 || cleanPhone.indexOf(rowPhone) !== -1;
     const timeMatch = rowTimestamp > cutoffTime;
     
-    Logger.log('Match check - Email: ' + emailMatch + ', Phone: ' + phoneMatch + ', Time: ' + timeMatch);
-    
     if (emailMatch && phoneMatch && timeMatch) {
-      Logger.log('✓ MATCH FOUND at row ' + (i + 2));
       return {
-        rowIndex: i + 2, // +2 because array is 0-based and sheet has header
+        rowIndex: i + 2,
         orderId: orderIds[i][0],
         timestamp: rowTimestamp
       };
     }
   }
   
-  Logger.log('✗ No match found');
   return null;
 }
 
-// ========================================
-// UPDATE EXISTING ORDER
-// ========================================
-function updateExistingOrder(sheet, existingRow, newOrder, newPricing, debugText) {
+function updateExistingOrder(sheet, existingRow, newOrder, newPricing) {
   const rowIndex = existingRow.rowIndex;
   
-  // Get existing values
   const mainProductCol = 10;
   const qtyCol = 11;
   const itemsCol = 12;
   const priceCol = 13;
-  const debugCol = 15;
+  const addressCol = 6;
+  const cityCol = 7;
+  const stateCol = 8;
+  const postcodeCol = 9;
   
-  const existingMainProduct = sheet.getRange(rowIndex, mainProductCol).getValue();
-  const existingQty = sheet.getRange(rowIndex, qtyCol).getValue();
   const existingItems = sheet.getRange(rowIndex, itemsCol).getValue();
-  const existingPrice = sheet.getRange(rowIndex, priceCol).getValue();
-  const existingDebug = sheet.getRange(rowIndex, debugCol).getValue();
+  const existingAddress = String(sheet.getRange(rowIndex, addressCol).getValue()).trim();
   
-  // Parse existing products
+  // Update address if missing and new order has address
+  if ((!existingAddress || existingAddress === 'N/A' || existingAddress === '' || existingAddress === 'dede') && 
+      newOrder.address && newOrder.address !== 'N/A' && newOrder.address !== '' && newOrder.address !== 'dede') {
+    sheet.getRange(rowIndex, addressCol).setValue(newOrder.address);
+    sheet.getRange(rowIndex, cityCol).setValue(newOrder.city);
+    sheet.getRange(rowIndex, stateCol).setValue(newOrder.state);
+    sheet.getRange(rowIndex, postcodeCol).setValue(newOrder.postcode);
+    Logger.log('✓ Updated address for existing order');
+  }
+  
+  // Parse and merge products
   const existingProductMap = parseExistingProducts(existingItems);
   
-  // Merge with new products
   for (let i = 0; i < newOrder.products.length; i++) {
     const p = newOrder.products[i];
     const info = CONFIG.PRODUCTS[p.id];
@@ -288,21 +478,12 @@ function updateExistingOrder(sheet, existingRow, newOrder, newPricing, debugText
   sheet.getRange(rowIndex, qtyCol).setValue(newTotalQty);
   sheet.getRange(rowIndex, itemsCol).setValue(newItemsStr);
   sheet.getRange(rowIndex, priceCol).setValue('RM' + newTotal.toFixed(2));
-  sheet.getRange(rowIndex, debugCol).setValue(existingDebug + '\n\n--- MERGED ---\n' + debugText);
-  
-  // Update timestamp to latest
   sheet.getRange(rowIndex, 1).setValue(new Date());
   
-  // Store values for response
   existingRow.newMainProduct = newMainProduct;
   existingRow.newTotal = newTotal;
-  
-  Logger.log('Updated order: ' + newMainProduct + ' = RM' + newTotal);
 }
 
-// ========================================
-// PARSE EXISTING PRODUCTS
-// ========================================
 function parseExistingProducts(itemsStr) {
   const productMap = {};
   if (!itemsStr) return productMap;
@@ -312,12 +493,10 @@ function parseExistingProducts(itemsStr) {
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
     
-    // Try to extract product name and quantity
     for (const id in CONFIG.PRODUCTS) {
       const info = CONFIG.PRODUCTS[id];
       
       if (item.indexOf(info.name) !== -1) {
-        // Try to find quantity pattern
         const qtyMatch = item.match(/x\s*([0-9]+)/i);
         const qty = qtyMatch ? parseInt(qtyMatch[1]) : 1;
         
@@ -330,9 +509,6 @@ function parseExistingProducts(itemsStr) {
   return productMap;
 }
 
-// ========================================
-// EXTRACT ORDER DATA
-// ========================================
 function extractOrderData(data) {
   const contact = data.contact || {};
   const custom = data.customData || {};
@@ -351,26 +527,18 @@ function extractOrderData(data) {
   };
 }
 
-// ========================================
-// EXTRACT PRODUCTS
-// ========================================
 function extractProducts(data) {
   let products = [];
   const order = data.order || {};
   const custom = data.customData || {};
 
   // METHOD 0: Parse from Order Summary field
-  Logger.log('Method 0: Checking for Order Summary...');
   const orderSummary = custom.order_summary || custom['Order Summary'] || custom.orderSummary || 
                        data.order_summary || data['Order Summary'] || data.orderSummary;
   
   if (orderSummary && typeof orderSummary === 'string') {
-    Logger.log('Found Order Summary: ' + orderSummary);
-    
     for (const id in CONFIG.PRODUCTS) {
       const info = CONFIG.PRODUCTS[id];
-      
-      // Try multiple regex patterns to find product and quantity
       const nameEscaped = info.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const nameNoParens = info.name.replace(/[（）]/g, '');
       const namePrefix = info.name.split('（')[0];
@@ -390,21 +558,16 @@ function extractProducts(data) {
             const qty = parseInt(match[1]);
             if (!isNaN(qty) && qty > 0) {
               products.push({ id: id, qty: qty });
-              Logger.log('Found from Order Summary: ' + info.name + ' x' + qty);
               break;
             }
           }
-        } catch (e) {
-          Logger.log('Regex error for pattern ' + i + ': ' + e.toString());
-        }
+        } catch (e) {}
       }
     }
   }
 
   // METHOD 1: Parse numbered product fields
   if (products.length === 0) {
-    Logger.log('Method 1: Checking numbered fields...');
-    
     for (let i = 1; i <= CONFIG.MAX_PRODUCTS; i++) {
       const productId = custom['product_id_' + i];
       let qtyValue = custom['qty_' + i];
@@ -422,7 +585,6 @@ function extractProducts(data) {
         
         if (!isNaN(quantity) && quantity > 0) {
           products.push({ id: productId, qty: quantity });
-          Logger.log('Found product ' + i + ': x' + quantity);
         }
       }
     }
@@ -430,8 +592,6 @@ function extractProducts(data) {
 
   // METHOD 2: Check for checkbox patterns
   if (products.length === 0) {
-    Logger.log('Method 2: Checking checkboxes...');
-    
     const allData = Object.assign({}, data, custom);
     
     for (const id in CONFIG.PRODUCTS) {
@@ -457,14 +617,12 @@ function extractProducts(data) {
         }
         
         products.push({ id: id, qty: qty });
-        Logger.log('Found checkbox: ' + info.name + ' x' + qty);
       }
     }
   }
 
   // METHOD 3: Parse from order.description
   if (products.length === 0 && order.description && typeof order.description === 'string') {
-    Logger.log('Method 3: Parsing description...');
     const desc = order.description;
     
     for (const id in CONFIG.PRODUCTS) {
@@ -473,12 +631,7 @@ function extractProducts(data) {
       if (desc.indexOf(info.name) !== -1) {
         let qty = 1;
         
-        // Try to find quantity pattern
-        const qtyPatterns = [
-          'x\\s*([0-9]+)',
-          'X\\s*([0-9]+)',
-          '×\\s*([0-9]+)'
-        ];
+        const qtyPatterns = ['x\\s*([0-9]+)', 'X\\s*([0-9]+)', '×\\s*([0-9]+)'];
         
         for (let i = 0; i < qtyPatterns.length; i++) {
           try {
@@ -488,14 +641,11 @@ function extractProducts(data) {
               qty = parseInt(match[1]);
               break;
             }
-          } catch (e) {
-            // Skip regex errors
-          }
+          } catch (e) {}
         }
         
         if (!products.find(function(p) { return p.id === id; })) {
           products.push({ id: id, qty: qty });
-          Logger.log('Found in description: ' + info.name + ' x' + qty);
         }
       }
     }
@@ -503,7 +653,6 @@ function extractProducts(data) {
 
   // METHOD 4: Single product fallback
   if (products.length === 0 && custom.product_id && CONFIG.PRODUCTS[custom.product_id]) {
-    Logger.log('Method 4: Single product...');
     products.push({ 
       id: custom.product_id, 
       qty: parseInt(custom.qty || 1) 
@@ -512,20 +661,15 @@ function extractProducts(data) {
 
   // METHOD 5: Fallback to internalProductId
   if (products.length === 0 && order.internalProductId && CONFIG.PRODUCTS[order.internalProductId]) {
-    Logger.log('Method 5: Using internalProductId...');
     products.push({ 
       id: order.internalProductId, 
       qty: parseInt(order.quantity || 1) 
     });
   }
 
-  Logger.log('Total products: ' + products.length);
   return products;
 }
 
-// ========================================
-// CALCULATE PRICING
-// ========================================
 function calculatePricing(order, data) {
   let total = 0;
   let items = [];
@@ -552,15 +696,12 @@ function calculatePricing(order, data) {
   };
 }
 
-// ========================================
-// SETUP HEADERS
-// ========================================
 function setupHeaders(sheet) {
   const headers = [
     'Timestamp', 'Order ID', 'Name', 'Email', 'Phone',
     'Address', 'City', 'State', 'Postcode',
     'Main Product', 'Quantity', 'Order Summary',
-    'Original Price', 'Status', 'Debug Info'
+    'Original Price', 'Status'
   ];
   sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
   sheet.getRange(1, 1, 1, headers.length)
@@ -568,9 +709,6 @@ function setupHeaders(sheet) {
   sheet.setFrozenRows(1);
 }
 
-// ========================================
-// GENERATE ORDER ID
-// ========================================
 function generateOrderId() {
   const now = new Date();
   const dateStr = Utilities.formatDate(now, 'GMT+8', 'yyyyMMdd');
