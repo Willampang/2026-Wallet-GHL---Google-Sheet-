@@ -1,0 +1,918 @@
+const SHOPIFY_CONFIG = {
+  SHOP_DOMAIN: 'fsr2021.myshopify.com',
+  ACCESS_TOKEN: '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',
+  API_VERSION: '2024-01',
+  
+  SPREADSHEET_ID: '1b5On_VvQF-6i634aXhSHwjMIY_m-f2SLhPnBMfM1cJo',
+  ORDERS_SHEET: 'Orders',
+  SHOPIFY_SHEET: 'Order -> Shopify',
+  
+  // Wallet Product Variant IDs - Shopify naming format
+  WALLETS: {
+    'A款——丰盛款': '47300563599512',
+    'B款——聚财款': '47300563239064',
+    'C款——富豪款': '47300563271832',
+    'D款——带财款': '47300563304600',
+    'E款——吸金款': '47300563337368'
+  },
+  
+  // Product Prices - From Shopify JSON
+  PRICES: {
+    'A款——丰盛款': '496.00',
+    'B款——聚财款': '496.00',
+    'C款——富豪款': '397.00',
+    'D款——带财款': '468.00',
+    'E款——吸金款': '468.00'
+  },
+  
+  // Discount Configuration
+  DISCOUNT: {
+    PRODUCTS: ['D款——带财款', 'E款——吸金款'],
+    QTY_1_DISCOUNT: 0.50,  // 50% off for quantity 1
+    QTY_2_PLUS_DISCOUNT: 0.60  // 60% off for quantity 2+
+  },
+  
+  // Alternative names mapping (GHL format → Shopify format)
+  WALLET_ALIASES: {
+    'A款（丰盛款）': 'A款——丰盛款',
+    'B款（聚财款）': 'B款——聚财款',
+    'C款（富豪款）': 'C款——富豪款',
+    'D款（带财款）': 'D款——带财款',
+    'D款（带财款x1）': 'D款——带财款',
+    'E款（吸金款）': 'E款——吸金款',
+    'E款（吸金款x1）': 'E款——吸金款'
+  },
+  
+  // Bundle Products - These contain multiple wallets
+  BUNDLES: {
+    'F款（带财款x1+吸金款x1）': {
+      'D款——带财款': 1,
+      'E款——吸金款': 1
+    },
+    'G款（带财款x2）': {
+      'D款——带财款': 2
+    },
+    'H款（吸金款x2）': {
+      'E款——吸金款': 2
+    }
+  },
+  
+  // Free Gift Variant IDs - Updated with correct IDs
+  GIFTS: {
+    SEED: '42948256792728',        // 2026不丹龙钞钱种
+    COIN_SINGLE: '47298925953176', // COPPER COIN
+    COIN_BAG: '47298927001752'     // Copper Coin + Velvet drawstring
+  }
+};
+
+// ===== PHONE NUMBER FORMATTING =====
+function formatPhoneNumber(phone) {
+  if (!phone || phone === 'N/A') return '';
+  
+  let cleaned = phone.replace(/[^\d+]/g, '');
+  
+  if (cleaned.startsWith('+')) return cleaned;
+  if (cleaned.startsWith('00')) return '+' + cleaned.substring(2);
+  
+  // Malaysia
+  if (cleaned.match(/^(01|6)/)) {
+    return cleaned.startsWith('6') ? '+' + cleaned : '+6' + cleaned;
+  }
+  
+  // Singapore
+  if (cleaned.length === 8 && cleaned.match(/^[689]/)) return '+65' + cleaned;
+  
+  // China
+  if (cleaned.length === 11 && cleaned.startsWith('1')) return '+86' + cleaned;
+  
+  // Hong Kong
+  if (cleaned.length === 8) return '+852' + cleaned;
+  
+  // Indonesia
+  if (cleaned.startsWith('8') && cleaned.length >= 10) return '+62' + cleaned;
+  if (cleaned.startsWith('62')) return '+' + cleaned;
+  
+  // Thailand
+  if (cleaned.startsWith('66')) return '+' + cleaned;
+  
+  // Philippines
+  if (cleaned.startsWith('9') && cleaned.length === 10) return '+63' + cleaned;
+  if (cleaned.startsWith('63')) return '+' + cleaned;
+  
+  // Vietnam
+  if (cleaned.startsWith('84')) return '+' + cleaned;
+  
+  // Fallback
+  if (cleaned.length >= 10) return '+' + cleaned;
+  return '+' + cleaned;
+}
+
+// ===== NORMALIZE PRODUCT STRING =====
+function normalizeProductString(str) {
+  if (!str) return '';
+  
+  return str
+    .replace(/\s+（/g, '（')
+    .replace(/）\s+/g, '）')
+    .replace(/\s+——/g, '——')
+    .replace(/——\s+/g, '——')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// ===== CONVERT TO SHOPIFY NAME =====
+function convertToShopifyName(ghlName) {
+  const normalized = normalizeProductString(ghlName);
+  
+  // Check if it's already in the aliases
+  if (SHOPIFY_CONFIG.WALLET_ALIASES[normalized]) {
+    return SHOPIFY_CONFIG.WALLET_ALIASES[normalized];
+  }
+  
+  // Check if it's already a Shopify format
+  if (SHOPIFY_CONFIG.WALLETS[normalized]) {
+    return normalized;
+  }
+  
+  // Try converting （） to ——
+  const converted = normalized.replace(/（/g, '——').replace(/）/g, '');
+  
+  if (SHOPIFY_CONFIG.WALLETS[converted]) {
+    return converted;
+  }
+  
+  return normalized;
+}
+
+// ===== FIND EXISTING CUSTOMER BY EMAIL =====
+function findCustomerByEmail(email) {
+  const url = 'https://' + SHOPIFY_CONFIG.SHOP_DOMAIN + 
+              '/admin/api/' + SHOPIFY_CONFIG.API_VERSION + 
+              '/customers/search.json?query=email:' + encodeURIComponent(email);
+  
+  const options = {
+    method: 'get',
+    headers: {
+      'X-Shopify-Access-Token': SHOPIFY_CONFIG.ACCESS_TOKEN
+    },
+    muteHttpExceptions: true
+  };
+  
+  try {
+    const response = UrlFetchApp.fetch(url, options);
+    
+    if (response.getResponseCode() === 200) {
+      const data = JSON.parse(response.getContentText());
+      
+      if (data.customers && data.customers.length > 0) {
+        Logger.log('✓ Found existing customer: ' + data.customers[0].id);
+        return data.customers[0].id;
+      }
+    }
+  } catch (error) {
+    Logger.log('⚠️ Could not search for customer: ' + error.toString());
+  }
+  
+  return null;
+}
+
+// ===== MANUAL PROCESS - NEXT PENDING ROW =====
+function processNextOrder() {
+  const ss = SpreadsheetApp.openById(SHOPIFY_CONFIG.SPREADSHEET_ID);
+  const sheet = ss.getSheetByName(SHOPIFY_CONFIG.ORDERS_SHEET);
+  
+  if (!sheet) {
+    Logger.log('❌ Orders sheet not found!');
+    return;
+  }
+  
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) {
+    Logger.log('ℹ️ No orders found in sheet.');
+    return;
+  }
+  
+  // Get all data
+  const data = sheet.getRange(2, 1, lastRow - 1, 16).getValues();
+  
+  // Find the first pending order without Shopify Order ID
+  for (let i = 0; i < data.length; i++) {
+    const rowIndex = i + 2;
+    const status = String(data[i][13] || '').trim();
+    const shopifyOrderId = data[i][15];
+    
+    if (status === 'Pending' && !shopifyOrderId) {
+      Logger.log('🔄 Processing next pending order - Row ' + rowIndex);
+      processOrder(sheet, rowIndex, data[i]);
+      Logger.log('✅ Order processed for Row ' + rowIndex);
+      return;
+    }
+  }
+  
+  // No pending orders found
+  Logger.log('✅ All Done - No pending orders found.');
+}
+
+// ===== PROCESS ORDER FUNCTION =====
+function processOrder(sheet, rowIndex, rowData) {
+  try {
+    const rawPhone = String(rowData[4] || '').trim();
+    const formattedPhone = formatPhoneNumber(rawPhone);
+    
+    const orderInfo = {
+      name: String(rowData[2] || 'N/A').trim(),
+      email: String(rowData[3] || '').trim(),
+      phone: formattedPhone,
+      phoneOriginal: rawPhone,
+      address: String(rowData[5] || 'N/A').trim(),
+      city: String(rowData[6] || 'N/A').trim(),
+      state: String(rowData[7] || 'N/A').trim(),
+      postcode: String(rowData[8] || 'N/A').trim(),
+      orderSummary: String(rowData[11] || '').trim(),
+      totalPrice: String(rowData[12] || '').trim()
+    };
+    
+    if (rawPhone && rawPhone !== formattedPhone) {
+      Logger.log('📞 Phone formatted: ' + rawPhone + ' → ' + formattedPhone);
+    }
+    
+    if (!orderInfo.email || orderInfo.email === 'N/A') {
+      throw new Error('Email is required');
+    }
+    
+    if (!orderInfo.orderSummary) {
+      throw new Error('Order Summary is empty');
+    }
+    
+    Logger.log('📦 Order Summary (Original): ' + orderInfo.orderSummary);
+    
+    const products = parseProducts(orderInfo.orderSummary);
+    
+    if (products.length === 0) {
+      throw new Error('No valid products found in Order Summary');
+    }
+    
+    Logger.log('✓ Found ' + products.length + ' product types');
+    
+    for (let i = 0; i < products.length; i++) {
+      Logger.log('  • ' + products[i].name + ' x' + products[i].quantity + ' @ RM' + products[i].price);
+    }
+    
+    const totalWallets = products.reduce(function(sum, p) {
+      return sum + p.quantity;
+    }, 0);
+    
+    Logger.log('👛 Total wallets: ' + totalWallets);
+    
+    const gifts = calculateGifts(totalWallets);
+    Logger.log('🎁 Free gifts: ' + JSON.stringify(gifts));
+    
+    const lineItems = [];
+    
+    // Add wallet products with prices
+    for (let i = 0; i < products.length; i++) {
+      lineItems.push({
+        variant_id: products[i].variantId,
+        quantity: products[i].quantity,
+        price: products[i].price
+      });
+    }
+    
+    // Add free gifts with zero price
+    for (let i = 0; i < gifts.length; i++) {
+      lineItems.push({
+        variant_id: gifts[i].variantId,
+        quantity: gifts[i].quantity,
+        price: '0.00'
+      });
+    }
+    
+    Logger.log('📝 Creating Shopify order with ' + lineItems.length + ' line items...');
+    
+    const result = createShopifyOrder(orderInfo, lineItems);
+    
+    if (result && result.order) {
+      const orderNumber = result.order.name;
+      
+      Logger.log('✅ Order created: ' + orderNumber);
+      
+      sheet.getRange(rowIndex, 14).setValue('Created');
+      sheet.getRange(rowIndex, 16).setValue(orderNumber);
+      sheet.getRange(rowIndex, 15).setValue('✓ Created: ' + orderNumber);
+      
+      copyToShopifySheet(orderInfo, orderNumber);
+      
+      Logger.log('✅ Order processing complete!');
+      
+    } else {
+      throw new Error('No response from Shopify API');
+    }
+    
+  } catch (error) {
+    Logger.log('❌ Error: ' + error.toString());
+    sheet.getRange(rowIndex, 14).setValue('Error');
+    sheet.getRange(rowIndex, 15).setValue('❌ ' + error.toString());
+    throw error;
+  }
+}
+
+// ===== SMART SPLIT - Split by + but not inside parentheses =====
+function smartSplit(str) {
+  const parts = [];
+  let currentPart = '';
+  let depth = 0;
+  
+  for (let i = 0; i < str.length; i++) {
+    const char = str[i];
+    
+    if (char === '（' || char === '(') {
+      depth++;
+      currentPart += char;
+    } else if (char === '）' || char === ')') {
+      depth--;
+      currentPart += char;
+    } else if (char === '+' && depth === 0) {
+      if (currentPart.trim()) {
+        parts.push(currentPart.trim());
+      }
+      currentPart = '';
+    } else {
+      currentPart += char;
+    }
+  }
+  
+  if (currentPart.trim()) {
+    parts.push(currentPart.trim());
+  }
+  
+  return parts;
+}
+
+// ===== PARSE PRODUCTS FROM ORDER SUMMARY =====
+function parseProducts(orderSummary) {
+  const foundProducts = {};
+  
+  const normalizedSummary = normalizeProductString(orderSummary);
+  Logger.log('📝 Normalized Summary: ' + normalizedSummary);
+  
+  const parts = smartSplit(normalizedSummary);
+  
+  for (let p = 0; p < parts.length; p++) {
+    const part = parts[p].trim();
+    let productFound = false;
+    
+    Logger.log('  🔍 Checking part: ' + part);
+    
+    // Check for bundle products first
+    for (const bundleName in SHOPIFY_CONFIG.BUNDLES) {
+      const normalizedBundleName = normalizeProductString(bundleName);
+      
+      if (part.indexOf(normalizedBundleName) !== 0) continue;
+      
+      Logger.log('  ✓ Found bundle: ' + bundleName);
+      
+      let bundleQty = 1;
+      const afterBundleName = part.substring(normalizedBundleName.length).trim();
+      const qtyMatch = afterBundleName.match(/^[xX×]\s*([0-9]+)/);
+      
+      if (qtyMatch && qtyMatch[1]) {
+        bundleQty = parseInt(qtyMatch[1]);
+        Logger.log('  ✓ Quantity: ' + bundleQty);
+      }
+      
+      const bundleContents = SHOPIFY_CONFIG.BUNDLES[bundleName];
+      for (const walletName in bundleContents) {
+        const walletQty = bundleContents[walletName] * bundleQty;
+        
+        if (foundProducts[walletName]) {
+          foundProducts[walletName] += walletQty;
+        } else {
+          foundProducts[walletName] = walletQty;
+        }
+        
+        Logger.log('  📦 Expanded ' + bundleName + ' x' + bundleQty + ' → ' + walletName + ' x' + walletQty);
+      }
+      
+      productFound = true;
+      break;
+    }
+    
+    // Check for regular wallet products (try both formats)
+    if (!productFound) {
+      // First, try to convert the part to Shopify naming
+      const convertedPart = convertToShopifyName(part.split(/[xX×]/)[0].trim());
+      
+      Logger.log('  🔄 Converted to: ' + convertedPart);
+      
+      // Try to find in WALLETS using converted name
+      for (const name in SHOPIFY_CONFIG.WALLETS) {
+        const normalizedName = normalizeProductString(name);
+        const normalizedConverted = normalizeProductString(convertedPart);
+        
+        // Check if it matches
+        if (normalizedConverted === normalizedName || part.indexOf(normalizedName) === 0) {
+          Logger.log('  ✓ Found wallet: ' + name);
+          
+          let qty = 1;
+          const qtyMatch = part.match(/[xX×]\s*([0-9]+)/);
+          
+          if (qtyMatch && qtyMatch[1]) {
+            qty = parseInt(qtyMatch[1]);
+            Logger.log('  ✓ Quantity: ' + qty);
+          }
+          
+          if (foundProducts[name]) {
+            foundProducts[name] += qty;
+          } else {
+            foundProducts[name] = qty;
+          }
+          
+          productFound = true;
+          break;
+        }
+      }
+      
+      // If still not found, try alias matching
+      if (!productFound) {
+        for (const alias in SHOPIFY_CONFIG.WALLET_ALIASES) {
+          const normalizedAlias = normalizeProductString(alias);
+          
+          if (part.indexOf(normalizedAlias) === 0) {
+            const shopifyName = SHOPIFY_CONFIG.WALLET_ALIASES[alias];
+            Logger.log('  ✓ Found via alias: ' + alias + ' → ' + shopifyName);
+            
+            let qty = 1;
+            const qtyMatch = part.match(/[xX×]\s*([0-9]+)/);
+            
+            if (qtyMatch && qtyMatch[1]) {
+              qty = parseInt(qtyMatch[1]);
+              Logger.log('  ✓ Quantity: ' + qty);
+            }
+            
+            if (foundProducts[shopifyName]) {
+              foundProducts[shopifyName] += qty;
+            } else {
+              foundProducts[shopifyName] = qty;
+            }
+            
+            productFound = true;
+            break;
+          }
+        }
+      }
+    }
+    
+    if (!productFound) {
+      Logger.log('  ⚠️ No product found in part: ' + part);
+    }
+  }
+  
+  const products = [];
+  for (const name in foundProducts) {
+    const quantity = foundProducts[name];
+    let price = SHOPIFY_CONFIG.PRICES[name] || '0.00';
+    
+    // Apply discount for D款 and E款
+    if (SHOPIFY_CONFIG.DISCOUNT.PRODUCTS.indexOf(name) !== -1) {
+      const originalPrice = parseFloat(price);
+      let discountRate;
+      
+      if (quantity === 1) {
+        discountRate = SHOPIFY_CONFIG.DISCOUNT.QTY_1_DISCOUNT;
+        Logger.log('  💰 Applying 50% discount to ' + name);
+      } else if (quantity >= 2) {
+        discountRate = SHOPIFY_CONFIG.DISCOUNT.QTY_2_PLUS_DISCOUNT;
+        Logger.log('  💰 Applying 60% discount to ' + name);
+      }
+      
+      if (discountRate) {
+        const discountedPrice = originalPrice * (1 - discountRate);
+        price = discountedPrice.toFixed(2);
+        Logger.log('  💵 Price after discount: RM' + originalPrice.toFixed(2) + ' → RM' + price);
+      }
+    }
+    
+    products.push({
+      name: name,
+      variantId: SHOPIFY_CONFIG.WALLETS[name],
+      quantity: quantity,
+      price: price
+    });
+  }
+  
+  return products;
+}
+
+// ===== CALCULATE FREE GIFTS =====
+function calculateGifts(totalWallets) {
+  const gifts = [];
+  
+  if (totalWallets === 0) return gifts;
+  
+  // 1. Add 钱种 (Seed) - 1 per wallet
+  gifts.push({
+    name: '2026不丹龙钞钱种',
+    variantId: SHOPIFY_CONFIG.GIFTS.SEED,
+    quantity: totalWallets
+  });
+  
+  // 2. Add copper coins based on wallet count
+  if (totalWallets >= 2) {
+    const bagCount = Math.floor(totalWallets / 2);
+    const singleCount = totalWallets % 2;
+    
+    if (bagCount > 0) {
+      gifts.push({
+        name: 'Copper Coin + Velvet drawstring',
+        variantId: SHOPIFY_CONFIG.GIFTS.COIN_BAG,
+        quantity: bagCount
+      });
+    }
+    
+    if (singleCount > 0) {
+      gifts.push({
+        name: 'COPPER COIN',
+        variantId: SHOPIFY_CONFIG.GIFTS.COIN_SINGLE,
+        quantity: singleCount
+      });
+    }
+  }
+  
+  return gifts;
+}
+
+// ===== CREATE SHOPIFY ORDER VIA API =====
+function createShopifyOrder(orderInfo, lineItems) {
+  const url = 'https://' + SHOPIFY_CONFIG.SHOP_DOMAIN + 
+              '/admin/api/' + SHOPIFY_CONFIG.API_VERSION + '/draft_orders.json';
+  
+  const address = {
+    first_name: orderInfo.name,
+    address1: orderInfo.address,
+    phone: orderInfo.phone || '',
+    city: orderInfo.city,
+    province: orderInfo.state,
+    country: 'MY',
+    zip: orderInfo.postcode
+  };
+  
+  // Search for existing customer
+  Logger.log('🔍 Searching for existing customer with email: ' + orderInfo.email);
+  const existingCustomerId = findCustomerByEmail(orderInfo.email);
+  
+  // Build draft order payload
+  const draftOrderPayload = {
+    line_items: lineItems,
+    shipping_address: address,
+    billing_address: address,
+    note: 'Auto-created from Google Sheet',
+    tags: 'GHL-Import, Auto Created',
+    email: orderInfo.email
+  };
+  
+  // Add customer reference
+  if (existingCustomerId) {
+    Logger.log('✓ Linking to existing customer ID: ' + existingCustomerId);
+    draftOrderPayload.customer = { id: existingCustomerId };
+  } else {
+    Logger.log('➕ Will create new customer');
+    draftOrderPayload.customer = {
+      first_name: orderInfo.name,
+      email: orderInfo.email
+    };
+  }
+  
+  const payload = {
+    draft_order: draftOrderPayload
+  };
+  
+  const options = {
+    method: 'post',
+    contentType: 'application/json',
+    headers: {
+      'X-Shopify-Access-Token': SHOPIFY_CONFIG.ACCESS_TOKEN
+    },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  };
+  
+  try {
+    const response = UrlFetchApp.fetch(url, options);
+    const code = response.getResponseCode();
+    const body = response.getContentText();
+    
+    Logger.log('Shopify API Response Code: ' + code);
+    
+    if (code === 201) {
+      const draftOrderData = JSON.parse(body);
+      const draftOrderId = draftOrderData.draft_order.id;
+      
+      Logger.log('✓ Draft order created: ' + draftOrderId);
+      
+      // Complete the draft order (mark as paid and convert to order)
+      try {
+        const completedOrder = completeDraftOrder(draftOrderId);
+        
+        if (completedOrder) {
+          Logger.log('✓ Draft order completed and converted to order');
+          
+          // Set fulfillment on hold
+          try {
+            setFulfillmentOnHold(completedOrder.id);
+          } catch (e) {
+            Logger.log('⚠️ Could not set fulfillment on hold: ' + e.toString());
+          }
+          
+          return { order: completedOrder };
+        }
+      } catch (e) {
+        Logger.log('⚠️ Could not complete draft order: ' + e.toString());
+        throw new Error('Draft order created but could not be completed: ' + e.toString());
+      }
+      
+      throw new Error('Failed to complete draft order');
+    } else {
+      Logger.log('Shopify API Error: ' + body);
+      throw new Error('API returned ' + code + ': ' + body.substring(0, 200));
+    }
+    
+  } catch (error) {
+    Logger.log('Failed to call Shopify API: ' + error.toString());
+    throw error;
+  }
+}
+
+// ===== MARK ORDER AS PAID =====
+function markOrderAsPaid(orderId) {
+  const url = 'https://' + SHOPIFY_CONFIG.SHOP_DOMAIN + 
+              '/admin/api/' + SHOPIFY_CONFIG.API_VERSION + 
+              '/orders/' + orderId + '/transactions.json';
+  
+  const payload = {
+    transaction: {
+      kind: 'sale',
+      status: 'success',
+      amount: 'pending'
+    }
+  };
+  
+  const options = {
+    method: 'post',
+    contentType: 'application/json',
+    headers: {
+      'X-Shopify-Access-Token': SHOPIFY_CONFIG.ACCESS_TOKEN
+    },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  };
+  
+  try {
+    const response = UrlFetchApp.fetch(url, options);
+    
+    if (response.getResponseCode() === 201) {
+      Logger.log('✓ Order marked as paid');
+    } else {
+      Logger.log('⚠️ Could not mark as paid: ' + response.getContentText());
+    }
+  } catch (error) {
+    Logger.log('⚠️ Error marking order as paid: ' + error.toString());
+  }
+}
+
+// ===== COMPLETE DRAFT ORDER (MARK AS PAID) =====
+function completeDraftOrder(draftOrderId) {
+  const url = 'https://' + SHOPIFY_CONFIG.SHOP_DOMAIN + 
+              '/admin/api/' + SHOPIFY_CONFIG.API_VERSION + 
+              '/draft_orders/' + draftOrderId + '/complete.json';
+  
+  const payload = {
+    payment_pending: false
+  };
+  
+  const options = {
+    method: 'put',
+    contentType: 'application/json',
+    headers: {
+      'X-Shopify-Access-Token': SHOPIFY_CONFIG.ACCESS_TOKEN
+    },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  };
+  
+  try {
+    const response = UrlFetchApp.fetch(url, options);
+    
+    if (response.getResponseCode() === 200) {
+      const data = JSON.parse(response.getContentText());
+      Logger.log('✓ Draft order completed successfully');
+      return data.draft_order.order_id ? getOrderDetails(data.draft_order.order_id) : null;
+    } else {
+      Logger.log('⚠️ Could not complete draft order: ' + response.getContentText());
+      return null;
+    }
+  } catch (error) {
+    Logger.log('⚠️ Error completing draft order: ' + error.toString());
+    throw error;
+  }
+}
+
+// ===== GET ORDER DETAILS =====
+function getOrderDetails(orderId) {
+  const url = 'https://' + SHOPIFY_CONFIG.SHOP_DOMAIN + 
+              '/admin/api/' + SHOPIFY_CONFIG.API_VERSION + 
+              '/orders/' + orderId + '.json';
+  
+  const options = {
+    method: 'get',
+    headers: {
+      'X-Shopify-Access-Token': SHOPIFY_CONFIG.ACCESS_TOKEN
+    },
+    muteHttpExceptions: true
+  };
+  
+  try {
+    const response = UrlFetchApp.fetch(url, options);
+    
+    if (response.getResponseCode() === 200) {
+      const data = JSON.parse(response.getContentText());
+      return data.order;
+    }
+  } catch (error) {
+    Logger.log('⚠️ Could not get order details: ' + error.toString());
+  }
+  
+  return null;
+}
+
+// ===== SET FULFILLMENT ON HOLD =====
+function setFulfillmentOnHold(orderId) {
+  const url = 'https://' + SHOPIFY_CONFIG.SHOP_DOMAIN + 
+              '/admin/api/' + SHOPIFY_CONFIG.API_VERSION + 
+              '/orders/' + orderId + '/fulfillment_orders.json';
+  
+  const options = {
+    method: 'get',
+    headers: {
+      'X-Shopify-Access-Token': SHOPIFY_CONFIG.ACCESS_TOKEN
+    },
+    muteHttpExceptions: true
+  };
+  
+  try {
+    const response = UrlFetchApp.fetch(url, options);
+    
+    if (response.getResponseCode() === 200) {
+      const data = JSON.parse(response.getContentText());
+      
+      if (data.fulfillment_orders && data.fulfillment_orders.length > 0) {
+        const fulfillmentOrderId = data.fulfillment_orders[0].id;
+        
+        const holdUrl = 'https://' + SHOPIFY_CONFIG.SHOP_DOMAIN + 
+                       '/admin/api/' + SHOPIFY_CONFIG.API_VERSION + 
+                       '/fulfillment_orders/' + fulfillmentOrderId + '/hold.json';
+        
+        const holdPayload = {
+          fulfillment_hold: {
+            reason: 'awaiting_payment',
+            reason_notes: 'Order on hold - awaiting processing'
+          }
+        };
+        
+        const holdOptions = {
+          method: 'post',
+          contentType: 'application/json',
+          headers: {
+            'X-Shopify-Access-Token': SHOPIFY_CONFIG.ACCESS_TOKEN
+          },
+          payload: JSON.stringify(holdPayload),
+          muteHttpExceptions: true
+        };
+        
+        const holdResponse = UrlFetchApp.fetch(holdUrl, holdOptions);
+        
+        if (holdResponse.getResponseCode() === 200) {
+          Logger.log('✓ Fulfillment set to on-hold');
+        } else {
+          Logger.log('⚠️ Could not set hold: ' + holdResponse.getContentText());
+        }
+      }
+    }
+  } catch (error) {
+    Logger.log('⚠️ Error setting fulfillment hold: ' + error.toString());
+  }
+}
+
+// ===== COPY TO ORDER -> SHOPIFY SHEET =====
+function copyToShopifySheet(orderInfo, shopifyOrderId) {
+  try {
+    const ss = SpreadsheetApp.openById(SHOPIFY_CONFIG.SPREADSHEET_ID);
+    let sheet = ss.getSheetByName(SHOPIFY_CONFIG.SHOPIFY_SHEET);
+    
+    if (!sheet) {
+      sheet = ss.insertSheet(SHOPIFY_CONFIG.SHOPIFY_SHEET);
+      
+      const headers = ['Timestamp', 'Name', 'Email', 'Phone', 'Order Summary', 'Total Price', 'Shopify Order ID'];
+      sheet.getRange(1, 1, 1, 7).setValues([headers])
+        .setFontWeight('bold')
+        .setBackground('#34A853')
+        .setFontColor('white');
+      sheet.setFrozenRows(1);
+    }
+    
+    const row = [
+      new Date(),
+      orderInfo.name,
+      orderInfo.email,
+      orderInfo.phone,
+      orderInfo.orderSummary,
+      orderInfo.totalPrice,
+      shopifyOrderId
+    ];
+    
+    sheet.appendRow(row);
+    SpreadsheetApp.flush();
+    
+    Logger.log('✓ Copied to Order -> Shopify sheet');
+    
+  } catch (error) {
+    Logger.log('⚠️ Could not copy to Shopify sheet: ' + error.toString());
+  }
+}
+
+// ===== MANUAL PROCESS ALL PENDING =====
+function processAllPendingOrders() {
+  const ss = SpreadsheetApp.openById(SHOPIFY_CONFIG.SPREADSHEET_ID);
+  const sheet = ss.getSheetByName(SHOPIFY_CONFIG.ORDERS_SHEET);
+  
+  if (!sheet) {
+    Logger.log('❌ Orders sheet not found');
+    SpreadsheetApp.getUi().alert('Error', 'Orders sheet not found', SpreadsheetApp.getUi().ButtonSet.OK);
+    return;
+  }
+  
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) {
+    Logger.log('ℹ️ No orders to process');
+    SpreadsheetApp.getUi().alert('Info', 'No orders to process', SpreadsheetApp.getUi().ButtonSet.OK);
+    return;
+  }
+  
+  const data = sheet.getRange(2, 1, lastRow - 1, 16).getValues();
+  let processed = 0;
+  let errors = 0;
+  
+  for (let i = 0; i < data.length; i++) {
+    const rowIndex = i + 2;
+    const status = String(data[i][13] || '').trim();
+    const shopifyOrderId = data[i][15];
+    
+    if (status === 'Pending' && !shopifyOrderId) {
+      Logger.log('\n📦 Processing row ' + rowIndex);
+      try {
+        processOrder(sheet, rowIndex, data[i]);
+        processed++;
+        Utilities.sleep(2000);
+      } catch (error) {
+        errors++;
+        Logger.log('❌ Error on row ' + rowIndex + ': ' + error.toString());
+      }
+    }
+  }
+  
+  Logger.log('\n✅ Processed ' + processed + ' orders, ' + errors + ' errors');
+  
+  SpreadsheetApp.getUi().alert(
+    'Process Complete',
+    'Processed: ' + processed + ' orders\nErrors: ' + errors + '\n\nCheck the logs for details.',
+    SpreadsheetApp.getUi().ButtonSet.OK
+  );
+}
+
+// ===== SETUP HELPER =====
+function setupShopifyColumns() {
+  const ss = SpreadsheetApp.openById(SHOPIFY_CONFIG.SPREADSHEET_ID);
+  const sheet = ss.getSheetByName(SHOPIFY_CONFIG.ORDERS_SHEET);
+  
+  if (!sheet) {
+    Logger.log('❌ Sheet not found');
+    return;
+  }
+  
+  const lastCol = sheet.getLastColumn();
+  const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  
+  const required = ['Error Message', 'Shopify Order ID'];
+  
+  for (let i = 0; i < required.length; i++) {
+    if (headers.indexOf(required[i]) === -1) {
+      const newCol = lastCol + 1;
+      sheet.getRange(1, newCol).setValue(required[i])
+        .setFontWeight('bold')
+        .setBackground('#4285f4')
+        .setFontColor('white');
+      Logger.log('✓ Added column: ' + required[i]);
+    }
+  }
+  
+  Logger.log('✅ Setup complete');
+}
