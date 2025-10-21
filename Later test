@@ -1,0 +1,754 @@
+const CONFIG = {
+  SPREADSHEET_ID: '1b5On_VvQF-6i634aXhSHwjMIY_m-f2SLhPnBMfM1cJo',
+  SHEET_NAME: 'Orders',
+  FORM_RESPONSES_SHEET: 'Form responses 1',
+
+  PRODUCTS: {
+    // First Page Products (A, B, C)
+    '68e517b495c688251fef4ede': { name: 'A款（丰盛款）', price: 496 },
+    '68e51814ea6f521f911e9622': { name: 'B款（聚财款）', price: 496 },
+    '68e517dd9b16bb4bdb99280e': { name: 'C款（富豪款）', price: 397 },
+    
+    // Second Page Bundle Products (D, E, F, G, H)
+    '68e880998a4f94fb8ae3d52f': { name: 'D款（带财款x1）', price: 234 },
+    '68e880b566345fab13b6d775': { name: 'E款（吸金款x1）', price: 234 },
+    '68e880746cc254b97272479f': { name: 'F款（带财款x1+吸金款x1）', price: 374 },
+    '68e884338a4f946ffce4f834': { name: 'G款（带财款x2）', price: 374 },
+    '68e8846066345f7038b8092c': { name: 'H款（吸金款x2）', price: 374 }
+  },
+
+  AUTO_CREATE_SHEET: true,
+  MAX_PRODUCTS: 10,
+  MERGE_TIMEOUT_MINUTES: 30,
+  USE_SCRIPT_LOCK: true,
+  LOCK_TIMEOUT_SECONDS: 30,
+  
+  // Column positions
+  PAYMENT_IDS_COLUMN: 20  // Column T
+};
+
+function doGet(e) {
+  return ContentService.createTextOutput(
+    JSON.stringify({
+      status: 'online',
+      version: '9.0 - Stripe Payment ID in Column T + auto address detection',
+      query: e.parameter,
+      products: Object.keys(CONFIG.PRODUCTS).length
+    })
+  ).setMimeType(ContentService.MimeType.JSON);
+}
+
+function doPost(e) {
+  let lock = null;
+  if (CONFIG.USE_SCRIPT_LOCK) {
+    lock = LockService.getScriptLock();
+    try {
+      lock.waitLock(CONFIG.LOCK_TIMEOUT_SECONDS * 1000);
+      Logger.log('✓ Lock acquired');
+    } catch (lockErr) {
+      Logger.log('✗ Could not acquire lock: ' + lockErr.toString());
+      return ContentService.createTextOutput(
+        JSON.stringify({ status: 'error', message: 'System busy, please retry' })
+      ).setMimeType(ContentService.MimeType.JSON);
+    }
+  }
+  
+  let rawBody = e.postData && e.postData.contents ? e.postData.contents : '';
+  let data = {};
+  try {
+    data = JSON.parse(rawBody);
+  } catch (err) {
+    data = e.parameter || {};
+  }
+
+  try {
+    const order = extractOrderData(data);
+    const pricing = calculatePricing(order, data);
+
+    const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+    let sheet = ss.getSheetByName(CONFIG.SHEET_NAME);
+    if (!sheet && CONFIG.AUTO_CREATE_SHEET) {
+      sheet = ss.insertSheet(CONFIG.SHEET_NAME);
+      setupHeaders(sheet);
+    }
+
+    SpreadsheetApp.flush();
+    
+    const existingRow = findExistingOrder(sheet, order.email, order.phone);
+    
+    if (existingRow) {
+      // UPDATE existing order (Upsell)
+      Logger.log('Found existing order at row: ' + existingRow.rowIndex);
+      updateExistingOrder(sheet, existingRow, order, pricing);
+      
+      if (lock) lock.releaseLock();
+      
+      return ContentService.createTextOutput(
+        JSON.stringify({
+          status: 'success',
+          action: 'updated',
+          orderId: existingRow.orderId,
+          mainProduct: existingRow.newMainProduct,
+          total: existingRow.newTotal,
+          productsFound: order.products.length,
+          paymentId: order.stripePaymentId
+        })
+      ).setMimeType(ContentService.MimeType.JSON);
+      
+    } else {
+      // CREATE new order
+      Logger.log('Creating new order');
+      const orderId = generateOrderId();
+      
+      if (order.address === 'N/A' || !order.address || order.address.trim() === '' || order.address === 'dede') {
+        Logger.log('Address missing, checking Form Responses...');
+        const formAddress = getAddressFromForm(ss, order.email, order.phone);
+        if (formAddress) {
+          order.address = formAddress.address;
+          order.city = formAddress.city;
+          order.state = formAddress.state;
+          order.postcode = formAddress.postcode;
+          Logger.log('✓ Address found and applied from Form Responses');
+        }
+      }
+      
+      // Create row with original 14 columns (A-N)
+      const row = [
+        new Date(),           // A: Timestamp
+        orderId,              // B: Order ID
+        order.name,           // C: Name
+        order.email,          // D: Email
+        order.phone,          // E: Phone
+        order.address,        // F: Address
+        order.city,           // G: City
+        order.state,          // H: State
+        order.postcode,       // I: Postcode
+        pricing.mainProductName,  // J: Main Product
+        pricing.totalQty,     // K: Quantity
+        pricing.items,        // L: Order Summary
+        'RM' + pricing.totalPrice.toFixed(2),  // M: Original Price
+        'Pending'             // N: Status
+      ];
+
+      sheet.appendRow(row);
+      
+      // Add Payment ID to Column T (column 20) separately
+      const newRowIndex = sheet.getLastRow();
+      if (order.stripePaymentId) {
+        sheet.getRange(newRowIndex, CONFIG.PAYMENT_IDS_COLUMN).setValue(order.stripePaymentId);
+        Logger.log('✓ Payment ID saved to Column T: ' + order.stripePaymentId);
+      }
+      
+      SpreadsheetApp.flush();
+      sheet.autoResizeColumns(1, sheet.getLastColumn());
+
+      if (lock) lock.releaseLock();
+
+      return ContentService.createTextOutput(
+        JSON.stringify({
+          status: 'success',
+          action: 'created',
+          orderId: orderId,
+          mainProduct: pricing.mainProductName,
+          total: pricing.totalPrice,
+          productsFound: order.products.length,
+          paymentId: order.stripePaymentId
+        })
+      ).setMimeType(ContentService.MimeType.JSON);
+    }
+
+  } catch (err) {
+    if (lock) {
+      try { lock.releaseLock(); } catch (e) {}
+    }
+    
+    const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+    let sheet = ss.getSheetByName(CONFIG.SHEET_NAME);
+    if (sheet) {
+      sheet.appendRow([new Date(), 'ERROR', '', '', '', '', '', '', '', '', '', '', '', '❌ ' + err.toString()]);
+    }
+    return ContentService.createTextOutput(
+      JSON.stringify({ status: 'error', message: err.toString() })
+    ).setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+function updateAddressesFromForm() {
+  const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+  const ordersSheet = ss.getSheetByName(CONFIG.SHEET_NAME);
+  const formSheet = ss.getSheetByName(CONFIG.FORM_RESPONSES_SHEET);
+  
+  if (!ordersSheet || !formSheet) {
+    Logger.log('Sheet not found');
+    SpreadsheetApp.getUi().alert('Error: Orders or Form Responses sheet not found');
+    return;
+  }
+  
+  const lastOrderRow = ordersSheet.getLastRow();
+  if (lastOrderRow < 2) {
+    SpreadsheetApp.getUi().alert('No orders found to update');
+    return;
+  }
+  
+  const ordersData = ordersSheet.getRange(2, 1, lastOrderRow - 1, 14).getValues();
+  
+  let updatedCount = 0;
+  
+  for (let i = 0; i < ordersData.length; i++) {
+    const rowIndex = i + 2;
+    const email = String(ordersData[i][3]).trim();
+    const phone = String(ordersData[i][4]).trim();
+    const currentAddress = String(ordersData[i][5]).trim();
+    
+    if (!currentAddress || currentAddress === 'N/A' || currentAddress === '' || currentAddress === 'dede') {
+      Logger.log('Row ' + rowIndex + ' missing address, checking form...');
+      
+      const formAddress = getAddressFromForm(ss, email, phone);
+      
+      if (formAddress) {
+        ordersSheet.getRange(rowIndex, 6).setValue(formAddress.address);
+        ordersSheet.getRange(rowIndex, 7).setValue(formAddress.city);
+        ordersSheet.getRange(rowIndex, 8).setValue(formAddress.state);
+        ordersSheet.getRange(rowIndex, 9).setValue(formAddress.postcode);
+        
+        updatedCount++;
+        Logger.log('✓ Updated address for row ' + rowIndex);
+      }
+    }
+  }
+  
+  SpreadsheetApp.flush();
+  Logger.log('Address update complete. Updated ' + updatedCount + ' orders.');
+  
+  SpreadsheetApp.getUi().alert('Address Update Complete', 
+    'Updated ' + updatedCount + ' orders with addresses from form responses.', 
+    SpreadsheetApp.getUi().ButtonSet.OK);
+}
+
+function onFormSubmit(e) {
+  try {
+    const ss = SpreadsheetApp.openById(CONFIG.SPREADSHEET_ID);
+    const ordersSheet = ss.getSheetByName(CONFIG.SHEET_NAME);
+    
+    if (!ordersSheet) return;
+    
+    const formResponse = e.values;
+    const submittedEmail1 = String(formResponse[1] || '').trim().toLowerCase();
+    const submittedEmail2 = String(formResponse[3] || '').trim().toLowerCase();
+    const submittedPhone = String(formResponse[10] || '').trim();
+    const addressLine1 = String(formResponse[4] || '').trim();
+    const addressLine2 = String(formResponse[5] || '').trim();
+    const city = String(formResponse[6] || '').trim();
+    const state = String(formResponse[7] || '').trim();
+    const postcode = String(formResponse[9] || '').trim();
+    
+    let submittedAddress = addressLine1;
+    if (addressLine2 && addressLine2 !== 'N/A' && addressLine2 !== '') {
+      submittedAddress = submittedAddress + ', ' + addressLine2;
+    }
+    
+    if (!submittedAddress || submittedAddress === 'N/A') {
+      Logger.log('No valid address in form submission');
+      return;
+    }
+    
+    Logger.log('Form submitted - Auto-updating orders with address...');
+    Logger.log('Email: ' + submittedEmail1 + ' / ' + submittedEmail2);
+    Logger.log('Phone: ' + submittedPhone);
+    
+    const lastOrderRow = ordersSheet.getLastRow();
+    if (lastOrderRow < 2) return;
+    
+    const ordersData = ordersSheet.getRange(2, 1, lastOrderRow - 1, 14).getValues();
+    
+    const cleanPhone = submittedPhone
+      .replace(/\D/g, '')
+      .replace(/^60/, '')
+      .replace(/^0/, '');
+    
+    let updatedCount = 0;
+    
+    for (let i = 0; i < ordersData.length; i++) {
+      const rowIndex = i + 2;
+      const orderEmail = String(ordersData[i][3]).trim().toLowerCase();
+      const orderPhone = String(ordersData[i][4]).trim();
+      const currentAddress = String(ordersData[i][5]).trim();
+      
+      const cleanOrderPhone = orderPhone
+        .replace(/\D/g, '')
+        .replace(/^60/, '')
+        .replace(/^0/, '');
+      
+      const emailMatch = orderEmail === submittedEmail1 || orderEmail === submittedEmail2;
+      const phoneMatch = cleanOrderPhone === cleanPhone || cleanPhone.indexOf(cleanOrderPhone) !== -1;
+      
+      if ((emailMatch || phoneMatch) && (!currentAddress || currentAddress === 'N/A' || currentAddress === '' || currentAddress === 'dede')) {
+        ordersSheet.getRange(rowIndex, 6).setValue(submittedAddress);
+        ordersSheet.getRange(rowIndex, 7).setValue(city);
+        ordersSheet.getRange(rowIndex, 8).setValue(state);
+        ordersSheet.getRange(rowIndex, 9).setValue(postcode);
+        
+        updatedCount++;
+        Logger.log('✓ Auto-updated row ' + rowIndex + ' for ' + orderEmail);
+      }
+    }
+    
+    SpreadsheetApp.flush();
+    Logger.log('✓ Form submission complete. Updated ' + updatedCount + ' order(s).');
+    
+  } catch (error) {
+    Logger.log('Error in onFormSubmit: ' + error.toString());
+  }
+}
+
+function getAddressFromForm(spreadsheet, email, phone) {
+  const formSheet = spreadsheet.getSheetByName(CONFIG.FORM_RESPONSES_SHEET);
+  
+  if (!formSheet) {
+    Logger.log('Form responses sheet not found');
+    return null;
+  }
+  
+  const lastRow = formSheet.getLastRow();
+  if (lastRow < 2) return null;
+  
+  const formData = formSheet.getRange(2, 1, lastRow - 1, formSheet.getLastColumn()).getValues();
+  
+  const cleanEmail = String(email).trim().toLowerCase();
+  const cleanPhone = String(phone).trim()
+    .replace(/\D/g, '')
+    .replace(/^60/, '')
+    .replace(/^0/, '');
+  
+  Logger.log('Searching form for: ' + cleanEmail + ' | ' + cleanPhone);
+  
+  for (let i = formData.length - 1; i >= 0; i--) {
+    const formEmail1 = String(formData[i][1] || '').trim().toLowerCase();
+    const formEmail2 = String(formData[i][3] || '').trim().toLowerCase();
+    const formPhoneRaw = String(formData[i][10] || '').trim();
+    const formPhone = formPhoneRaw
+      .replace(/\D/g, '')
+      .replace(/^60/, '')
+      .replace(/^0/, '');
+    
+    const emailMatch = formEmail1 === cleanEmail || formEmail2 === cleanEmail;
+    const phoneMatch = formPhone === cleanPhone || formPhoneRaw.indexOf(cleanPhone) !== -1 || cleanPhone.indexOf(formPhone) !== -1;
+    
+    if (emailMatch || phoneMatch) {
+      const addressLine1 = String(formData[i][4] || '').trim();
+      const addressLine2 = String(formData[i][5] || '').trim();
+      const city = String(formData[i][6] || '').trim();
+      const state = String(formData[i][7] || '').trim();
+      const postcode = String(formData[i][9] || '').trim();
+      
+      let fullAddress = addressLine1;
+      if (addressLine2 && addressLine2 !== 'N/A' && addressLine2 !== '') {
+        fullAddress = fullAddress + ', ' + addressLine2;
+      }
+      
+      if (fullAddress && fullAddress !== 'N/A' && fullAddress !== '') {
+        Logger.log('✓ Found address: ' + fullAddress);
+        return {
+          address: fullAddress,
+          city: city || 'N/A',
+          state: state || 'N/A',
+          postcode: postcode || 'N/A'
+        };
+      }
+    }
+  }
+  
+  Logger.log('✗ No address found in form responses');
+  return null;
+}
+
+function findExistingOrder(sheet, email, phone) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return null;
+  
+  const emailCol = 4;
+  const phoneCol = 5;
+  const timestampCol = 1;
+  const orderIdCol = 2;
+  
+  const emailValues = sheet.getRange(2, emailCol, lastRow - 1, 1).getValues();
+  const phoneValues = sheet.getRange(2, phoneCol, lastRow - 1, 1).getValues();
+  const timestamps = sheet.getRange(2, timestampCol, lastRow - 1, 1).getValues();
+  const orderIds = sheet.getRange(2, orderIdCol, lastRow - 1, 1).getValues();
+  
+  const now = new Date();
+  const cutoffTime = new Date(now.getTime() - CONFIG.MERGE_TIMEOUT_MINUTES * 60 * 1000);
+  
+  const cleanPhone = String(phone).trim()
+    .replace(/\D/g, '')
+    .replace(/^60/, '')
+    .replace(/^0/, '');
+  
+  for (let i = lastRow - 2; i >= 0; i--) {
+    const rowEmail = String(emailValues[i][0]).trim().toLowerCase();
+    const rowPhoneRaw = String(phoneValues[i][0]).trim();
+    const rowPhone = rowPhoneRaw
+      .replace(/\D/g, '')
+      .replace(/^60/, '')
+      .replace(/^0/, '');
+    const rowTimestamp = new Date(timestamps[i][0]);
+    
+    const emailMatch = rowEmail === email.toLowerCase();
+    const phoneMatch = rowPhone === cleanPhone || rowPhoneRaw.indexOf(cleanPhone) !== -1 || cleanPhone.indexOf(rowPhone) !== -1;
+    const timeMatch = rowTimestamp > cutoffTime;
+    
+    if (emailMatch && phoneMatch && timeMatch) {
+      return {
+        rowIndex: i + 2,
+        orderId: orderIds[i][0],
+        timestamp: rowTimestamp
+      };
+    }
+  }
+  
+  return null;
+}
+
+function updateExistingOrder(sheet, existingRow, newOrder, newPricing) {
+  const rowIndex = existingRow.rowIndex;
+  
+  const mainProductCol = 10;
+  const qtyCol = 11;
+  const itemsCol = 12;
+  const priceCol = 13;
+  const addressCol = 6;
+  const cityCol = 7;
+  const stateCol = 8;
+  const postcodeCol = 9;
+  const paymentIdsCol = CONFIG.PAYMENT_IDS_COLUMN;  // Column T (20)
+  
+  const existingItems = sheet.getRange(rowIndex, itemsCol).getValue();
+  const existingAddress = String(sheet.getRange(rowIndex, addressCol).getValue()).trim();
+  const existingPaymentIds = String(sheet.getRange(rowIndex, paymentIdsCol).getValue()).trim();
+  
+  // Update address if missing
+  if ((!existingAddress || existingAddress === 'N/A' || existingAddress === '' || existingAddress === 'dede') && 
+      newOrder.address && newOrder.address !== 'N/A' && newOrder.address !== '' && newOrder.address !== 'dede') {
+    sheet.getRange(rowIndex, addressCol).setValue(newOrder.address);
+    sheet.getRange(rowIndex, cityCol).setValue(newOrder.city);
+    sheet.getRange(rowIndex, stateCol).setValue(newOrder.state);
+    sheet.getRange(rowIndex, postcodeCol).setValue(newOrder.postcode);
+    Logger.log('✓ Updated address for existing order');
+  }
+  
+  // Merge payment IDs (for upsell)
+  if (newOrder.stripePaymentId && newOrder.stripePaymentId !== 'N/A') {
+    let paymentIdsList = [];
+    
+    if (existingPaymentIds && existingPaymentIds !== 'N/A' && existingPaymentIds !== '') {
+      paymentIdsList = existingPaymentIds.split(',').map(function(id) { return id.trim(); });
+    }
+    
+    if (paymentIdsList.indexOf(newOrder.stripePaymentId) === -1) {
+      paymentIdsList.push(newOrder.stripePaymentId);
+    }
+    
+    const updatedPaymentIds = paymentIdsList.join(', ');
+    sheet.getRange(rowIndex, paymentIdsCol).setValue(updatedPaymentIds);
+    Logger.log('✓ Updated payment IDs in Column T: ' + updatedPaymentIds);
+  }
+  
+  // Parse and merge products
+  const existingProductMap = parseExistingProducts(existingItems);
+  
+  for (let i = 0; i < newOrder.products.length; i++) {
+    const p = newOrder.products[i];
+    const info = CONFIG.PRODUCTS[p.id];
+    if (info) {
+      if (existingProductMap[p.id]) {
+        existingProductMap[p.id].qty += p.qty;
+      } else {
+        existingProductMap[p.id] = { name: info.name, qty: p.qty, price: info.price };
+      }
+    }
+  }
+  
+  // Recalculate totals
+  let newTotal = 0;
+  let newTotalQty = 0;
+  let newItems = [];
+  let newMainProducts = [];
+  
+  for (const id in existingProductMap) {
+    const prod = existingProductMap[id];
+    newTotal += prod.price * prod.qty;
+    newTotalQty += prod.qty;
+    newItems.push(prod.name + ' x' + prod.qty);
+    newMainProducts.push(prod.name);
+  }
+  
+  const newMainProduct = newMainProducts.length > 1 ? newMainProducts.join(' + ') : newMainProducts[0];
+  const newItemsStr = newItems.join(' + ');
+  
+  // Update the row
+  sheet.getRange(rowIndex, mainProductCol).setValue(newMainProduct);
+  sheet.getRange(rowIndex, qtyCol).setValue(newTotalQty);
+  sheet.getRange(rowIndex, itemsCol).setValue(newItemsStr);
+  sheet.getRange(rowIndex, priceCol).setValue('RM' + newTotal.toFixed(2));
+  sheet.getRange(rowIndex, 1).setValue(new Date());
+  
+  existingRow.newMainProduct = newMainProduct;
+  existingRow.newTotal = newTotal;
+}
+
+function parseExistingProducts(itemsStr) {
+  const productMap = {};
+  if (!itemsStr) return productMap;
+  
+  const items = String(itemsStr).split('+').map(function(s) { return s.trim(); });
+  
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    
+    for (const id in CONFIG.PRODUCTS) {
+      const info = CONFIG.PRODUCTS[id];
+      
+      if (item.indexOf(info.name) !== -1) {
+        const qtyMatch = item.match(/x\s*([0-9]+)/i);
+        const qty = qtyMatch ? parseInt(qtyMatch[1]) : 1;
+        
+        productMap[id] = { name: info.name, qty: qty, price: info.price };
+        break;
+      }
+    }
+  }
+  
+  return productMap;
+}
+
+function extractOrderData(data) {
+  const contact = data.contact || {};
+  const custom = data.customData || {};
+
+  const getField = (n) => data[n] || contact[n] || custom[n] || '';
+
+  // Extract Stripe Payment ID from multiple possible locations
+  const getStripePaymentId = () => {
+    const possibleFields = [
+      custom.stripe_payment_id,
+      custom.payment_id,
+      data.stripe_payment_id,
+      data.payment_id,
+      (data.payment || {}).id,
+      (data.payment || {}).payment_intent,
+      (data.payment || {}).stripe_payment_id,
+      (data.order || {}).payment_id,
+      (data.order || {}).transaction_id
+    ];
+    
+    for (let i = 0; i < possibleFields.length; i++) {
+      const value = possibleFields[i];
+      if (value && String(value).trim() !== '' && value !== 'N/A') {
+        const cleanValue = String(value).trim();
+        Logger.log('✓ Stripe Payment ID found: ' + cleanValue);
+        return cleanValue;
+      }
+    }
+    
+    Logger.log('✗ Stripe Payment ID not found in webhook data');
+    return null;
+  };
+
+  return {
+    name: getField('full_name') || getField('name') || custom['1'] || 'N/A',
+    email: getField('email') || custom['2'] || 'N/A',
+    phone: getField('phone') || custom['3'] || 'N/A',
+    address: getField('address') || getField('full_address') || custom['4'] || 'N/A',
+    city: getField('city') || custom['5'] || 'N/A',
+    state: getField('state') || custom['7'] || 'N/A',
+    postcode: getField('postal_code') || custom['8'] || 'N/A',
+    products: extractProducts(data),
+    stripePaymentId: getStripePaymentId()
+  };
+}
+
+function extractProducts(data) {
+  let products = [];
+  const order = data.order || {};
+  const custom = data.customData || {};
+
+  const orderSummary = custom.order_summary || custom['Order Summary'] || custom.orderSummary || 
+                       data.order_summary || data['Order Summary'] || data.orderSummary;
+  
+  if (orderSummary && typeof orderSummary === 'string') {
+    for (const id in CONFIG.PRODUCTS) {
+      const info = CONFIG.PRODUCTS[id];
+      const nameEscaped = info.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const nameNoParens = info.name.replace(/[（）]/g, '');
+      const namePrefix = info.name.split('（')[0];
+      
+      const patterns = [
+        nameEscaped + '[:\\s]*([0-9]+)',
+        nameNoParens + '[:\\s]*([0-9]+)',
+        namePrefix + '[:\\s]*([0-9]+)'
+      ];
+      
+      for (let i = 0; i < patterns.length; i++) {
+        try {
+          const regex = new RegExp(patterns[i], 'i');
+          const match = orderSummary.match(regex);
+          
+          if (match && match[1]) {
+            const qty = parseInt(match[1]);
+            if (!isNaN(qty) && qty > 0) {
+              products.push({ id: id, qty: qty });
+              break;
+            }
+          }
+        } catch (e) {}
+      }
+    }
+  }
+
+  if (products.length === 0) {
+    for (let i = 1; i <= CONFIG.MAX_PRODUCTS; i++) {
+      const productId = custom['product_id_' + i];
+      let qtyValue = custom['qty_' + i];
+      
+      if (qtyValue && typeof qtyValue === 'object' && qtyValue.quantity) {
+        qtyValue = qtyValue.quantity;
+      }
+      
+      if (qtyValue) {
+        qtyValue = String(qtyValue).trim();
+      }
+      
+      if (productId && CONFIG.PRODUCTS[productId]) {
+        const quantity = parseInt(qtyValue || 0);
+        
+        if (!isNaN(quantity) && quantity > 0) {
+          products.push({ id: productId, qty: quantity });
+        }
+      }
+    }
+  }
+
+  if (products.length === 0) {
+    const allData = Object.assign({}, data, custom);
+    
+    for (const id in CONFIG.PRODUCTS) {
+      const info = CONFIG.PRODUCTS[id];
+      const checkboxValue = allData[info.name] || data[info.name] || custom[info.name];
+      
+      if (checkboxValue) {
+        let qty = 1;
+        
+        const possibleQtyFields = [
+          info.name + '_quantity',
+          info.name + ' quantity',
+          info.name + '_qty'
+        ];
+        
+        for (let j = 0; j < possibleQtyFields.length; j++) {
+          const qtyField = possibleQtyFields[j];
+          const qtyVal = allData[qtyField] || data[qtyField] || custom[qtyField];
+          if (qtyVal && !isNaN(parseInt(qtyVal))) {
+            qty = parseInt(qtyVal);
+            break;
+          }
+        }
+        
+        products.push({ id: id, qty: qty });
+      }
+    }
+  }
+  if (products.length === 0 && order.description && typeof order.description === 'string') {
+    const desc = order.description;
+    
+    for (const id in CONFIG.PRODUCTS) {
+      const info = CONFIG.PRODUCTS[id];
+      
+      if (desc.indexOf(info.name) !== -1) {
+        let qty = 1;
+        
+        const qtyPatterns = ['x\\s*([0-9]+)', 'X\\s*([0-9]+)', '×\\s*([0-9]+)'];
+        
+        for (let i = 0; i < qtyPatterns.length; i++) {
+          try {
+            const regex = new RegExp(qtyPatterns[i], 'i');
+            const match = desc.match(regex);
+            if (match && match[1]) {
+              qty = parseInt(match[1]);
+              break;
+            }
+          } catch (e) {}
+        }
+        
+        if (!products.find(function(p) { return p.id === id; })) {
+          products.push({ id: id, qty: qty });
+        }
+      }
+    }
+  }
+
+  if (products.length === 0 && custom.product_id && CONFIG.PRODUCTS[custom.product_id]) {
+    products.push({ 
+      id: custom.product_id, 
+      qty: parseInt(custom.qty || 1) 
+    });
+  }
+
+  if (products.length === 0 && order.internalProductId && CONFIG.PRODUCTS[order.internalProductId]) {
+    products.push({ 
+      id: order.internalProductId, 
+      qty: parseInt(order.quantity || 1) 
+    });
+  }
+  return products;
+}
+
+function calculatePricing(order, data) {
+  let total = 0;
+  let items = [];
+  let names = [];
+  let totalQty = 0;
+
+  for (let i = 0; i < order.products.length; i++) {
+    const p = order.products[i];
+    const info = CONFIG.PRODUCTS[p.id];
+    if (info) {
+      total += info.price * p.qty;
+      totalQty += p.qty;
+      names.push(info.name);
+      items.push(info.name + ' x' + p.qty);
+    }
+  }
+
+  const mainProductName = names.length > 1 ? names.join(' + ') : (names[0] || 'N/A');
+  return { 
+    totalPrice: total, 
+    mainProductName: mainProductName, 
+    items: items.join(' + '), 
+    totalQty: totalQty 
+  };
+}
+
+function setupHeaders(sheet) {
+  const headers = [
+    'Timestamp', 'Order ID', 'Name', 'Email', 'Phone',
+    'Address', 'City', 'State', 'Postcode',
+    'Main Product', 'Quantity', 'Order Summary',
+    'Original Price', 'Status'
+  ];
+  sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+  sheet.getRange(1, 1, 1, headers.length)
+    .setFontWeight('bold').setBackground('#4285f4').setFontColor('#fff');
+  sheet.setFrozenRows(1);
+  
+  // Add Payment IDs header to Column T (column 20)
+  sheet.getRange(1, CONFIG.PAYMENT_IDS_COLUMN).setValue('Payment IDs');
+  sheet.getRange(1, CONFIG.PAYMENT_IDS_COLUMN)
+    .setFontWeight('bold').setBackground('#4285f4').setFontColor('#fff');
+}
+
+function generateOrderId() {
+  const now = new Date();
+  const dateStr = Utilities.formatDate(now, 'GMT+8', 'yyyyMMdd');
+  const rand = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
+  return 'ORD-' + dateStr + '-' + rand;
+}
