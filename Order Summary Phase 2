@@ -1,0 +1,358 @@
+// ===== SALES SUMMARY CONFIGURATION =====
+const SALES_CONFIG = {
+  SPREADSHEET_ID: '1b5On_VvQF-6i634aXhSHwjMIY_m-f2SLhPnBMfM1cJo',
+  ORDERS_SHEET: 'Orders_2',  // Changed to Orders_2
+  SUMMARY_SHEET: 'Sales Summary',
+  START_ROW: 4,  // Start reading from row 4
+  SUMMARY_START_ROW: 19,  // Paste results starting at row 19
+  
+  // Display names for the summary report
+  PRODUCT_NAMES: {
+    'A款——丰盛款': 'A.丰盛款（长）',
+    'B款——聚财款': 'B.聚财款',
+    'C款——富豪款': 'C.富豪款（短）',
+    'D款——带财款': 'D.带财款',
+    'E款——吸金款': 'E.吸金款（卡包）'
+  },
+  
+  // Alternate product names mapping (from order format to standard format)
+  ALT_NAMES: {
+    'A款（丰盛款）': 'A款——丰盛款',
+    'B款（聚财款）': 'B款——聚财款',
+    'C款（富豪款）': 'C款——富豪款',
+    'D款（带财款x1）': 'D款——带财款',
+    'E款（吸金款x1）': 'E款——吸金款'
+  },
+  
+  // Bundle definitions: each bundle expands to multiple individual products
+  BUNDLES: {
+    'F款（带财款x1+吸金款x1）': {
+      'D款——带财款': 1,
+      'E款——吸金款': 1
+    },
+    'G款（带财款x2）': {
+      'D款——带财款': 2
+    },
+    'H款（吸金款x2）': {
+      'E款——吸金款': 2
+    }
+  }
+};
+
+// ===== NORMALIZE PRODUCT STRING =====
+// Removes extra spaces around Chinese punctuation for consistent matching
+function normalizeProductString(str) {
+  if (!str) return '';
+  return str.replace(/\s+（/g, '（')
+    .replace(/）\s+/g, '）')
+    .replace(/\s+——/g, '——')
+    .replace(/——\s+/g, '——')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// ===== SMART SPLIT =====
+// Splits order string by '+' but respects parentheses
+// Example: "A款（丰盛款） x3 + F款（带财款x1+吸金款x1） x1"
+// Results in: ["A款（丰盛款） x3", "F款（带财款x1+吸金款x1） x1"]
+function smartSplit(str) {
+  const parts = [];
+  let currentPart = '';
+  let depth = 0;
+  
+  for (let i = 0; i < str.length; i++) {
+    const char = str[i];
+    
+    if (char === '（' || char === '(') {
+      depth++;
+      currentPart += char;
+    } else if (char === '）' || char === ')') {
+      depth--;
+      currentPart += char;
+    } else if (char === '+' && depth === 0) {
+      // Only split on '+' when not inside parentheses
+      if (currentPart.trim()) {
+        parts.push(currentPart.trim());
+      }
+      currentPart = '';
+    } else {
+      currentPart += char;
+    }
+  }
+  
+  if (currentPart.trim()) {
+    parts.push(currentPart.trim());
+  }
+  
+  return parts;
+}
+
+// ===== PARSE PRODUCTS FOR SUMMARY =====
+// Main parsing function that converts order summaries to product quantities
+// Handles:
+// - Individual products: "A款（丰盛款） x3" → A:3
+// - Bundles: "F款（带财款x1+吸金款x1） x1" → D:1, E:1
+// - Bundle multiples: "G款（带财款x2） x2" → D:4 (2 bundles × 2 items each)
+function parseProductsForSummary(orderSummary) {
+  const stockCount = {
+    'A款——丰盛款': 0, 
+    'B款——聚财款': 0, 
+    'C款——富豪款': 0,
+    'D款——带财款': 0, 
+    'E款——吸金款': 0
+  };
+  
+  const normalized = normalizeProductString(orderSummary);
+  const parts = smartSplit(normalized);
+
+  for (const part of parts) {
+    let matched = false;
+    
+    // STEP 1: Check if part is a BUNDLE (F/G/H款)
+    for (const bundleName in SALES_CONFIG.BUNDLES) {
+      const normBundle = normalizeProductString(bundleName);
+      
+      // Check if part starts with bundle name
+      if (part.indexOf(normBundle) === 0) {
+        // Extract quantity multiplier AFTER the bundle name
+        const afterBundle = part.substring(normBundle.length).trim();
+        let qty = 1; // Default to 1 bundle
+        
+        // Look for "x2" or "× 3" pattern after bundle name
+        const qtyMatch = afterBundle.match(/^[xX×]\s*([0-9]+)/);
+        if (qtyMatch) {
+          qty = parseInt(qtyMatch[1]);
+        }
+        
+        // Add individual products from the bundle (multiplied by bundle quantity)
+        for (const product in SALES_CONFIG.BUNDLES[bundleName]) {
+          stockCount[product] += SALES_CONFIG.BUNDLES[bundleName][product] * qty;
+        }
+        matched = true;
+        break;
+      }
+    }
+
+    // STEP 2: If not a bundle, check ALTERNATE NAMES (more specific patterns)
+    if (!matched) {
+      for (const alt in SALES_CONFIG.ALT_NAMES) {
+        const targetKey = SALES_CONFIG.ALT_NAMES[alt];
+        const na = normalizeProductString(alt);
+        
+        if (part.indexOf(na) === 0) {
+          const match = part.match(/[xX×]\s*([0-9]+)/);
+          const qty = match ? parseInt(match[1]) : 1;
+          stockCount[targetKey] += qty;
+          matched = true;
+          break;
+        }
+      }
+      
+      // STEP 3: If still not matched, check MAIN PRODUCT NAMES
+      if (!matched) {
+        for (const k in stockCount) {
+          const nk = normalizeProductString(k);
+          if (part.indexOf(nk) === 0) {
+            const match = part.match(/[xX×]\s*([0-9]+)/);
+            const qty = match ? parseInt(match[1]) : 1;
+            stockCount[k] += qty;
+            break;
+          }
+        }
+      }
+    }
+  }
+  
+  return stockCount;
+}
+
+// ===== MAIN FUNCTION =====
+function generateSalesSummaryPhase2() {
+  const ss = SpreadsheetApp.openById(SALES_CONFIG.SPREADSHEET_ID);
+  const ordersSheet = ss.getSheetByName(SALES_CONFIG.ORDERS_SHEET);
+  if (!ordersSheet) throw new Error('Orders_2 sheet not found!');
+
+  const lastRow = ordersSheet.getLastRow();
+  if (lastRow < SALES_CONFIG.START_ROW) {
+    SpreadsheetApp.getUi().alert('No orders found.');
+    return;
+  }
+
+  // Read order data (starting from row 4, columns A-P)
+  const numRows = lastRow - SALES_CONFIG.START_ROW + 1;
+  const data = ordersSheet.getRange(SALES_CONFIG.START_ROW, 1, numRows, 16).getValues();
+  const summarySheet = ss.getSheetByName(SALES_CONFIG.SUMMARY_SHEET) || ss.insertSheet(SALES_CONFIG.SUMMARY_SHEET);
+
+  // === Phase 2 Yellow Header ===
+  const now = new Date();
+  const dateStr = Utilities.formatDate(now, Session.getScriptTimeZone(), 'dd MMM yyyy');
+  const timeStr = Utilities.formatDate(now, Session.getScriptTimeZone(), 'h:mm a');
+
+  const startRow = SALES_CONFIG.SUMMARY_START_ROW;
+
+  summarySheet.getRange(startRow, 1, 1, 7).merge().setValue('Phase 2 (3rd day from 3pm)')
+    .setBackground('#FFFF00').setFontWeight('bold').setHorizontalAlignment('center').setFontSize(14);
+  summarySheet.getRange(startRow + 1, 1, 1, 7).merge().setValue(`${dateStr} Wallet Sales Update (${timeStr})`)
+    .setBackground('#FFFF00').setFontWeight('bold').setHorizontalAlignment('center').setFontSize(14);
+
+  // Column headers
+  const headers = [
+    'Platform',
+    SALES_CONFIG.PRODUCT_NAMES['A款——丰盛款'],
+    SALES_CONFIG.PRODUCT_NAMES['B款——聚财款'],
+    SALES_CONFIG.PRODUCT_NAMES['C款——富豪款'],
+    SALES_CONFIG.PRODUCT_NAMES['D款——带财款'],
+    SALES_CONFIG.PRODUCT_NAMES['E款——吸金款'],
+    'Total Sales'
+  ];
+  summarySheet.getRange(startRow + 2, 1, 1, 7).setValues([headers])
+    .setBackground('#FFFF00').setFontWeight('bold').setHorizontalAlignment('center')
+    .setBorder(true, true, true, true, true, true);
+
+  // === Platform summary ===
+  const platformSummary = {
+    'GHL': { 
+      'A款——丰盛款': 0, 'B款——聚财款': 0, 'C款——富豪款': 0, 
+      'D款——带财款': 0, 'E款——吸金款': 0,
+      totalSales: 0 
+    },
+    'Shopify (VIP)': { 
+      'A款——丰盛款': 0, 'B款——聚财款': 0, 'C款——富豪款': 0, 
+      'D款——带财款': 0, 'E款——吸金款': 0,
+      totalSales: 0 
+    }
+  };
+
+  const dailySummary = {};
+
+  // Process each order
+  for (const row of data) {
+    const status = String(row[13] || '').trim(); // Column N (index 13)
+    const orderSummary = String(row[11] || '').trim(); // Column L (index 11)
+    const totalPrice = parseFloat(String(row[12] || '').replace(/[^\d.]/g, '')) || 0; // Column M
+    const platform = String(row[9] || 'GHL').trim(); // Column J (index 9)
+    const dateRaw = row[0]; // Column A (index 0)
+    
+    // Only process Pending or Created orders with valid data
+    if (!dateRaw || !orderSummary || (status !== 'Pending' && status !== 'Created')) continue;
+    
+    const orderDate = Utilities.formatDate(new Date(dateRaw), Session.getScriptTimeZone(), 'yyyy-MM-dd');
+
+    // Determine platform category
+    const platformKey = platform.toLowerCase().includes('shopify') ? 'Shopify (VIP)' : 'GHL';
+    
+    // Parse products from order summary
+    const stockCount = parseProductsForSummary(orderSummary);
+
+    // Accumulate platform totals
+    for (const k in stockCount) {
+      platformSummary[platformKey][k] += stockCount[k];
+    }
+    platformSummary[platformKey].totalSales += totalPrice;
+
+    // Daily accumulation
+    if (!dailySummary[orderDate]) {
+      dailySummary[orderDate] = { 
+        'A款——丰盛款': 0, 'B款——聚财款': 0, 'C款——富豪款': 0,
+        'D款——带财款': 0, 'E款——吸金款': 0,
+        totalSales: 0 
+      };
+    }
+    for (const k in stockCount) {
+      dailySummary[orderDate][k] += stockCount[k];
+    }
+    dailySummary[orderDate].totalSales += totalPrice;
+  }
+
+  // Calculate grand totals
+  const totals = {
+    'A款——丰盛款': platformSummary['GHL']['A款——丰盛款'] + platformSummary['Shopify (VIP)']['A款——丰盛款'],
+    'B款——聚财款': platformSummary['GHL']['B款——聚财款'] + platformSummary['Shopify (VIP)']['B款——聚财款'],
+    'C款——富豪款': platformSummary['GHL']['C款——富豪款'] + platformSummary['Shopify (VIP)']['C款——富豪款'],
+    'D款——带财款': platformSummary['GHL']['D款——带财款'] + platformSummary['Shopify (VIP)']['D款——带财款'],
+    'E款——吸金款': platformSummary['GHL']['E款——吸金款'] + platformSummary['Shopify (VIP)']['E款——吸金款'],
+    totalSales: platformSummary['GHL'].totalSales + platformSummary['Shopify (VIP)'].totalSales
+  };
+
+  // === Write summary table ===
+  summarySheet.getRange(startRow + 3, 1, 1, 7).setValues([[
+    'GHL',
+    platformSummary['GHL']['A款——丰盛款'],
+    platformSummary['GHL']['B款——聚财款'],
+    platformSummary['GHL']['C款——富豪款'],
+    platformSummary['GHL']['D款——带财款'],
+    platformSummary['GHL']['E款——吸金款'],
+    platformSummary['GHL'].totalSales
+  ]]).setBorder(true, true, true, true, true, true);
+
+  summarySheet.getRange(startRow + 4, 1, 1, 7).setValues([[
+    'Shopify (VIP)',
+    platformSummary['Shopify (VIP)']['A款——丰盛款'],
+    platformSummary['Shopify (VIP)']['B款——聚财款'],
+    platformSummary['Shopify (VIP)']['C款——富豪款'],
+    platformSummary['Shopify (VIP)']['D款——带财款'],
+    platformSummary['Shopify (VIP)']['E款——吸金款'],
+    platformSummary['Shopify (VIP)'].totalSales
+  ]]).setBorder(true, true, true, true, true, true);
+
+  summarySheet.getRange(startRow + 5, 1, 1, 7).setValues([[
+    'Total:',
+    totals['A款——丰盛款'],
+    totals['B款——聚财款'],
+    totals['C款——富豪款'],
+    totals['D款——带财款'],
+    totals['E款——吸金款'],
+    totals.totalSales
+  ]]).setBackground('#FFD966').setFontWeight('bold').setBorder(true, true, true, true, true, true);
+
+  // Format currency columns
+  summarySheet.getRange(`G${startRow + 3}:G${startRow + 5}`).setNumberFormat('#,##0.00');
+  summarySheet.getRange(`A${startRow + 2}:G${startRow + 5}`).setHorizontalAlignment('center');
+  summarySheet.setColumnWidths(1, 7, 120);
+
+  // === Append daily breakdown ===
+  let r = startRow + 7;
+  const sortedDates = Object.keys(dailySummary).sort();
+
+  for (const d of sortedDates) {
+    const day = dailySummary[d];
+    const rowVals = [
+      `📅 ${d} (Daily Sales)`,
+      day['A款——丰盛款'],
+      day['B款——聚财款'],
+      day['C款——富豪款'],
+      day['D款——带财款'],
+      day['E款——吸金款'],
+      day.totalSales
+    ];
+    summarySheet.getRange(r, 1, 1, 7).setValues([rowVals])
+      .setFontWeight('bold')
+      .setBackground('#D9E2F3')
+      .setBorder(true, true, true, true, true, true)
+      .setHorizontalAlignment('center');
+    summarySheet.getRange(`G${r}`).setNumberFormat('#,##0.00');
+    r++;
+  }
+
+  SpreadsheetApp.getUi().alert('✅ Phase 2 Sales summary generated successfully!');
+}
+
+// ===== TEST FUNCTION (Optional - for debugging) =====
+function testParsing() {
+  const testOrders = [
+    'A款（丰盛款） x3 + F款（带财款x1+吸金款x1） x1',
+    'A款（丰盛款） x2 + B款（聚财款） x1 + G款（带财款x2） x2',
+    'C款（富豪款） x2 + G款（带财款x2） x1',
+    'A款（丰盛款） x1 + C款（富豪款） x1 + H款（吸金款x2） x1',
+    'G款（带财款x2） x1',
+    'B款（聚财款） x1 + G款（带财款x2） x1'
+  ];
+  
+  Logger.log('=== PARSING TEST ===');
+  testOrders.forEach(order => {
+    const result = parseProductsForSummary(order);
+    Logger.log(`Order: ${order}`);
+    Logger.log(`Result: A:${result['A款——丰盛款']} B:${result['B款——聚财款']} C:${result['C款——富豪款']} D:${result['D款——带财款']} E:${result['E款——吸金款']}`);
+    Logger.log('---');
+  });
+}
