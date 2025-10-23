@@ -4,8 +4,14 @@ const SHOPIFY_CONFIG = {
   API_VERSION: '2024-01',
   
   SPREADSHEET_ID: '1b5On_VvQF-6i634aXhSHwjMIY_m-f2SLhPnBMfM1cJo',
-  ORDERS_SHEET: 'Orders',
+  ORDERS_SHEET: 'Orders',  // UPDATED SHEET NAME
   SHOPIFY_SHEET: 'Order -> Shopify',
+  
+  // Payment Gateway - Set to Stripe
+  PAYMENT_GATEWAY: 'stripe',
+  
+  // Batch Processing Limit - Change this number to process more/fewer orders at once
+  BATCH_LIMIT: 5,  // Process 5 orders at a time (change as needed)
   
   // Wallet Product Variant IDs - Shopify naming format
   WALLETS: {
@@ -25,11 +31,11 @@ const SHOPIFY_CONFIG = {
     'E款——吸金款': '468.00'
   },
   
-  // Discount Configuration
+  // Discount Configuration - Discount amounts to deduct
   DISCOUNT: {
     PRODUCTS: ['D款——带财款', 'E款——吸金款'],
-    QTY_1_DISCOUNT: 0.50,  // 50% off for quantity 1
-    QTY_2_PLUS_DISCOUNT: 0.60  // 60% off for quantity 2+
+    QTY_1_DISCOUNT: 234.00,
+    QTY_2_PLUS_DISCOUNT: 281.00
   },
   
   // Alternative names mapping (GHL format → Shopify format)
@@ -43,7 +49,7 @@ const SHOPIFY_CONFIG = {
     'E款（吸金款x1）': 'E款——吸金款'
   },
   
-  // Bundle Products - These contain multiple wallets
+  // Bundle Products
   BUNDLES: {
     'F款（带财款x1+吸金款x1）': {
       'D款——带财款': 1,
@@ -57,11 +63,23 @@ const SHOPIFY_CONFIG = {
     }
   },
   
-  // Free Gift Variant IDs - Updated with correct IDs
+  // Free Gift Variant IDs
   GIFTS: {
-    SEED: '42948256792728',        // 2026不丹龙钞钱种
-    COIN_SINGLE: '47298925953176', // COPPER COIN
-    COIN_BAG: '47298927001752'     // Copper Coin + Velvet drawstring
+    SEED: '42948256792728',
+    COIN_SINGLE: '47298925953176',
+    COIN_BAG: '47298927001752'
+  },
+  
+  // Golden Card Variant IDs - NEW!
+  GOLDEN_CARDS: {
+    '震宫': '47294134386840',
+    '巽宫': '47294134223000',
+    '乾宫': '47294133665944',
+    '离宫': '47294133600408',
+    '坤宫': '47294132519064',
+    '坎宫': '47294132224152',
+    '艮宫': '47294132191384',
+    '兑宫': '47294131011736'
   }
 };
 
@@ -74,35 +92,20 @@ function formatPhoneNumber(phone) {
   if (cleaned.startsWith('+')) return cleaned;
   if (cleaned.startsWith('00')) return '+' + cleaned.substring(2);
   
-  // Malaysia
   if (cleaned.match(/^(01|6)/)) {
     return cleaned.startsWith('6') ? '+' + cleaned : '+6' + cleaned;
   }
   
-  // Singapore
   if (cleaned.length === 8 && cleaned.match(/^[689]/)) return '+65' + cleaned;
-  
-  // China
   if (cleaned.length === 11 && cleaned.startsWith('1')) return '+86' + cleaned;
-  
-  // Hong Kong
   if (cleaned.length === 8) return '+852' + cleaned;
-  
-  // Indonesia
   if (cleaned.startsWith('8') && cleaned.length >= 10) return '+62' + cleaned;
   if (cleaned.startsWith('62')) return '+' + cleaned;
-  
-  // Thailand
   if (cleaned.startsWith('66')) return '+' + cleaned;
-  
-  // Philippines
   if (cleaned.startsWith('9') && cleaned.length === 10) return '+63' + cleaned;
   if (cleaned.startsWith('63')) return '+' + cleaned;
-  
-  // Vietnam
   if (cleaned.startsWith('84')) return '+' + cleaned;
   
-  // Fallback
   if (cleaned.length >= 10) return '+' + cleaned;
   return '+' + cleaned;
 }
@@ -124,17 +127,14 @@ function normalizeProductString(str) {
 function convertToShopifyName(ghlName) {
   const normalized = normalizeProductString(ghlName);
   
-  // Check if it's already in the aliases
   if (SHOPIFY_CONFIG.WALLET_ALIASES[normalized]) {
     return SHOPIFY_CONFIG.WALLET_ALIASES[normalized];
   }
   
-  // Check if it's already a Shopify format
   if (SHOPIFY_CONFIG.WALLETS[normalized]) {
     return normalized;
   }
   
-  // Try converting （） to ——
   const converted = normalized.replace(/（/g, '——').replace(/）/g, '');
   
   if (SHOPIFY_CONFIG.WALLETS[converted]) {
@@ -142,6 +142,50 @@ function convertToShopifyName(ghlName) {
   }
   
   return normalized;
+}
+
+// ===== PARSE GOLDEN CARD DATA FROM COLUMN R =====
+// Input: "震宫x2 | 离宫x1"
+// Output: [{ name: '震宫', variantId: '47294134386840', quantity: 2 }, ...]
+function parseGoldenCards(goldenCardData) {
+  const goldenCards = [];
+  
+  if (!goldenCardData || goldenCardData === '' || goldenCardData === 'N/A') {
+    return goldenCards;
+  }
+  
+  Logger.log('🎴 Parsing Golden Card data: ' + goldenCardData);
+  
+  // Split by | separator
+  const parts = goldenCardData.split('|');
+  
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i].trim();
+    
+    // Match pattern like "震宫x2"
+    const match = part.match(/^(.+?)x(\d+)$/);
+    
+    if (match) {
+      const cardName = match[1].trim();
+      const quantity = parseInt(match[2]);
+      
+      // Get variant ID from config
+      const variantId = SHOPIFY_CONFIG.GOLDEN_CARDS[cardName];
+      
+      if (variantId) {
+        goldenCards.push({
+          name: cardName,
+          variantId: variantId,
+          quantity: quantity
+        });
+        Logger.log('  ✓ Golden Card: ' + cardName + ' x' + quantity + ' (Variant ID: ' + variantId + ')');
+      } else {
+        Logger.log('  ⚠️ Unknown Golden Card: ' + cardName);
+      }
+    }
+  }
+  
+  return goldenCards;
 }
 
 // ===== FIND EXISTING CUSTOMER BY EMAIL =====
@@ -192,14 +236,12 @@ function processNextOrder() {
     return;
   }
   
-  // Get all data
-  const data = sheet.getRange(2, 1, lastRow - 1, 16).getValues();
+  const data = sheet.getRange(2, 1, lastRow - 1, 18).getValues();  // Read up to column R (18)
   
-  // Find the first pending order without Shopify Order ID
   for (let i = 0; i < data.length; i++) {
     const rowIndex = i + 2;
-    const status = String(data[i][13] || '').trim();
-    const shopifyOrderId = data[i][15];
+    const status = String(data[i][13] || '').trim();  // Column N
+    const shopifyOrderId = data[i][15];  // Column P
     
     if (status === 'Pending' && !shopifyOrderId) {
       Logger.log('🔄 Processing next pending order - Row ' + rowIndex);
@@ -209,7 +251,6 @@ function processNextOrder() {
     }
   }
   
-  // No pending orders found
   Logger.log('✅ All Done - No pending orders found.');
 }
 
@@ -228,8 +269,9 @@ function processOrder(sheet, rowIndex, rowData) {
       city: String(rowData[6] || 'N/A').trim(),
       state: String(rowData[7] || 'N/A').trim(),
       postcode: String(rowData[8] || 'N/A').trim(),
-      orderSummary: String(rowData[11] || '').trim(),
-      totalPrice: String(rowData[12] || '').trim()
+      orderSummary: String(rowData[11] || '').trim(),  // Column L
+      totalPrice: String(rowData[12] || '').trim(),
+      goldenCardData: String(rowData[17] || '').trim()  // Column R - GOLDEN CARD DATA
     };
     
     if (rawPhone && rawPhone !== formattedPhone) {
@@ -244,7 +286,7 @@ function processOrder(sheet, rowIndex, rowData) {
       throw new Error('Order Summary is empty');
     }
     
-    Logger.log('📦 Order Summary (Original): ' + orderInfo.orderSummary);
+    Logger.log('📦 Order Summary: ' + orderInfo.orderSummary);
     
     const products = parseProducts(orderInfo.orderSummary);
     
@@ -264,12 +306,16 @@ function processOrder(sheet, rowIndex, rowData) {
     
     Logger.log('👛 Total wallets: ' + totalWallets);
     
+    // Parse Golden Card data from Column R
+    const goldenCards = parseGoldenCards(orderInfo.goldenCardData);
+    Logger.log('🎴 Golden Cards found: ' + goldenCards.length);
+    
     const gifts = calculateGifts(totalWallets);
     Logger.log('🎁 Free gifts: ' + JSON.stringify(gifts));
     
     const lineItems = [];
     
-    // Add wallet products with prices
+    // Add wallet products
     for (let i = 0; i < products.length; i++) {
       lineItems.push({
         variant_id: products[i].variantId,
@@ -278,7 +324,17 @@ function processOrder(sheet, rowIndex, rowData) {
       });
     }
     
-    // Add free gifts with zero price
+    // Add Golden Card products (FREE)
+    for (let i = 0; i < goldenCards.length; i++) {
+      lineItems.push({
+        variant_id: goldenCards[i].variantId,
+        quantity: goldenCards[i].quantity,
+        price: '0.00'
+      });
+      Logger.log('  ✓ Added Golden Card: ' + goldenCards[i].name + ' x' + goldenCards[i].quantity);
+    }
+    
+    // Add free gifts
     for (let i = 0; i < gifts.length; i++) {
       lineItems.push({
         variant_id: gifts[i].variantId,
@@ -316,7 +372,7 @@ function processOrder(sheet, rowIndex, rowData) {
   }
 }
 
-// ===== SMART SPLIT - Split by + but not inside parentheses =====
+// ===== SMART SPLIT =====
 function smartSplit(str) {
   const parts = [];
   let currentPart = '';
@@ -363,7 +419,6 @@ function parseProducts(orderSummary) {
     
     Logger.log('  🔍 Checking part: ' + part);
     
-    // Check for bundle products first
     for (const bundleName in SHOPIFY_CONFIG.BUNDLES) {
       const normalizedBundleName = normalizeProductString(bundleName);
       
@@ -397,19 +452,15 @@ function parseProducts(orderSummary) {
       break;
     }
     
-    // Check for regular wallet products (try both formats)
     if (!productFound) {
-      // First, try to convert the part to Shopify naming
       const convertedPart = convertToShopifyName(part.split(/[xX×]/)[0].trim());
       
       Logger.log('  🔄 Converted to: ' + convertedPart);
       
-      // Try to find in WALLETS using converted name
       for (const name in SHOPIFY_CONFIG.WALLETS) {
         const normalizedName = normalizeProductString(name);
         const normalizedConverted = normalizeProductString(convertedPart);
         
-        // Check if it matches
         if (normalizedConverted === normalizedName || part.indexOf(normalizedName) === 0) {
           Logger.log('  ✓ Found wallet: ' + name);
           
@@ -432,7 +483,6 @@ function parseProducts(orderSummary) {
         }
       }
       
-      // If still not found, try alias matching
       if (!productFound) {
         for (const alias in SHOPIFY_CONFIG.WALLET_ALIASES) {
           const normalizedAlias = normalizeProductString(alias);
@@ -467,36 +517,41 @@ function parseProducts(orderSummary) {
     }
   }
   
+  let totalDiscountQty = 0;
+  for (const name in foundProducts) {
+    if (SHOPIFY_CONFIG.DISCOUNT.PRODUCTS.indexOf(name) !== -1) {
+      totalDiscountQty += foundProducts[name];
+    }
+  }
+  
+  Logger.log('💰 Total D款 + E款 quantity: ' + totalDiscountQty);
+  
+  let discountPerItem = 0;
+  
+  if (totalDiscountQty === 1) {
+    discountPerItem = SHOPIFY_CONFIG.DISCOUNT.QTY_1_DISCOUNT;
+    Logger.log('💰 Discount rule: RM' + discountPerItem.toFixed(2) + ' off each (only 1 D款 or E款)');
+  } else if (totalDiscountQty >= 2) {
+    discountPerItem = SHOPIFY_CONFIG.DISCOUNT.QTY_2_PLUS_DISCOUNT;
+    Logger.log('💰 Discount rule: RM' + discountPerItem.toFixed(2) + ' off each (2+ D款/E款 combined)');
+  }
+  
   const products = [];
   for (const name in foundProducts) {
     const quantity = foundProducts[name];
-    let price = SHOPIFY_CONFIG.PRICES[name] || '0.00';
+    const originalPrice = parseFloat(SHOPIFY_CONFIG.PRICES[name] || '0.00');
+    let finalPrice = originalPrice;
     
-    // Apply discount for D款 and E款
-    if (SHOPIFY_CONFIG.DISCOUNT.PRODUCTS.indexOf(name) !== -1) {
-      const originalPrice = parseFloat(price);
-      let discountRate;
-      
-      if (quantity === 1) {
-        discountRate = SHOPIFY_CONFIG.DISCOUNT.QTY_1_DISCOUNT;
-        Logger.log('  💰 Applying 50% discount to ' + name);
-      } else if (quantity >= 2) {
-        discountRate = SHOPIFY_CONFIG.DISCOUNT.QTY_2_PLUS_DISCOUNT;
-        Logger.log('  💰 Applying 60% discount to ' + name);
-      }
-      
-      if (discountRate) {
-        const discountedPrice = originalPrice * (1 - discountRate);
-        price = discountedPrice.toFixed(2);
-        Logger.log('  💵 Price after discount: RM' + originalPrice.toFixed(2) + ' → RM' + price);
-      }
+    if (SHOPIFY_CONFIG.DISCOUNT.PRODUCTS.indexOf(name) !== -1 && discountPerItem > 0) {
+      finalPrice = originalPrice - discountPerItem;
+      Logger.log('  💵 ' + name + ': RM' + originalPrice.toFixed(2) + ' - RM' + discountPerItem.toFixed(2) + ' = RM' + finalPrice.toFixed(2));
     }
     
     products.push({
       name: name,
       variantId: SHOPIFY_CONFIG.WALLETS[name],
       quantity: quantity,
-      price: price
+      price: finalPrice.toFixed(2)
     });
   }
   
@@ -509,14 +564,12 @@ function calculateGifts(totalWallets) {
   
   if (totalWallets === 0) return gifts;
   
-  // 1. Add 钱种 (Seed) - 1 per wallet
   gifts.push({
     name: '2026不丹龙钞钱种',
     variantId: SHOPIFY_CONFIG.GIFTS.SEED,
     quantity: totalWallets
   });
   
-  // 2. Add copper coins based on wallet count
   if (totalWallets >= 2) {
     const bagCount = Math.floor(totalWallets / 2);
     const singleCount = totalWallets % 2;
@@ -541,10 +594,10 @@ function calculateGifts(totalWallets) {
   return gifts;
 }
 
-// ===== CREATE SHOPIFY ORDER VIA API =====
+// ===== CREATE SHOPIFY ORDER (OPTIMIZED FOR SAGE 300) =====
 function createShopifyOrder(orderInfo, lineItems) {
-  const url = 'https://' + SHOPIFY_CONFIG.SHOP_DOMAIN + 
-              '/admin/api/' + SHOPIFY_CONFIG.API_VERSION + '/draft_orders.json';
+  const draftUrl = 'https://' + SHOPIFY_CONFIG.SHOP_DOMAIN + 
+                   '/admin/api/' + SHOPIFY_CONFIG.API_VERSION + '/draft_orders.json';
   
   const address = {
     first_name: orderInfo.name,
@@ -556,253 +609,197 @@ function createShopifyOrder(orderInfo, lineItems) {
     zip: orderInfo.postcode
   };
   
-  // Search for existing customer
   Logger.log('🔍 Searching for existing customer with email: ' + orderInfo.email);
   const existingCustomerId = findCustomerByEmail(orderInfo.email);
   
-  // Build draft order payload
-  const draftOrderPayload = {
-    line_items: lineItems,
-    shipping_address: address,
-    billing_address: address,
-    note: 'Auto-created from Google Sheet',
-    tags: 'GHL-Import, Auto Created',
-    email: orderInfo.email
+  let catalogTotal = 0;
+  let discountedTotal = 0;
+  
+  for (let i = 0; i < lineItems.length; i++) {
+    const item = lineItems[i];
+    const discountPrice = parseFloat(item.price);
+    const itemQty = item.quantity;
+    
+    discountedTotal += discountPrice * itemQty;
+    
+    let catalogPrice = discountPrice;
+    for (const name in SHOPIFY_CONFIG.WALLETS) {
+      if (SHOPIFY_CONFIG.WALLETS[name] === item.variant_id) {
+        catalogPrice = parseFloat(SHOPIFY_CONFIG.PRICES[name] || discountPrice);
+        break;
+      }
+    }
+    catalogTotal += catalogPrice * itemQty;
+  }
+  
+  const discountAmount = (catalogTotal - discountedTotal).toFixed(2);
+  
+  Logger.log('💰 Catalog total: RM' + catalogTotal.toFixed(2));
+  Logger.log('💰 After discount: RM' + discountedTotal.toFixed(2));
+  Logger.log('💰 Discount: RM' + discountAmount);
+  
+  const paymentId = 'pi_' + Utilities.getUuid().replace(/-/g, '').substring(0, 24);
+  
+  const draftPayload = {
+    draft_order: {
+      line_items: lineItems.map(function(item) {
+        return {
+          variant_id: item.variant_id,
+          quantity: item.quantity
+        };
+      }),
+      customer: existingCustomerId ? 
+        { id: existingCustomerId } : 
+        { first_name: orderInfo.name, email: orderInfo.email },
+      shipping_address: address,
+      billing_address: address,
+      email: orderInfo.email,
+      tags: 'GHL-Import',
+      use_customer_default_address: false,
+      applied_discount: parseFloat(discountAmount) > 0 ? {
+        description: 'Promotion Discount',
+        value_type: 'fixed_amount',
+        value: discountAmount,
+        amount: discountAmount
+      } : null
+    }
   };
   
-  // Add customer reference
   if (existingCustomerId) {
-    Logger.log('✓ Linking to existing customer ID: ' + existingCustomerId);
-    draftOrderPayload.customer = { id: existingCustomerId };
+    Logger.log('✓ Using customer ID: ' + existingCustomerId);
   } else {
-    Logger.log('➕ Will create new customer');
-    draftOrderPayload.customer = {
-      first_name: orderInfo.name,
-      email: orderInfo.email
-    };
+    Logger.log('➕ Creating new customer');
   }
   
-  const payload = {
-    draft_order: draftOrderPayload
-  };
-  
-  const options = {
+  const draftOptions = {
     method: 'post',
     contentType: 'application/json',
     headers: {
       'X-Shopify-Access-Token': SHOPIFY_CONFIG.ACCESS_TOKEN
     },
-    payload: JSON.stringify(payload),
+    payload: JSON.stringify(draftPayload),
     muteHttpExceptions: true
   };
   
   try {
-    const response = UrlFetchApp.fetch(url, options);
-    const code = response.getResponseCode();
-    const body = response.getContentText();
+    Logger.log('📝 Creating draft order...');
+    const draftResp = UrlFetchApp.fetch(draftUrl, draftOptions);
+    const draftCode = draftResp.getResponseCode();
     
-    Logger.log('Shopify API Response Code: ' + code);
-    
-    if (code === 201) {
-      const draftOrderData = JSON.parse(body);
-      const draftOrderId = draftOrderData.draft_order.id;
-      
-      Logger.log('✓ Draft order created: ' + draftOrderId);
-      
-      // Complete the draft order (mark as paid and convert to order)
-      try {
-        const completedOrder = completeDraftOrder(draftOrderId);
-        
-        if (completedOrder) {
-          Logger.log('✓ Draft order completed and converted to order');
-          
-          // Set fulfillment on hold
-          try {
-            setFulfillmentOnHold(completedOrder.id);
-          } catch (e) {
-            Logger.log('⚠️ Could not set fulfillment on hold: ' + e.toString());
-          }
-          
-          return { order: completedOrder };
-        }
-      } catch (e) {
-        Logger.log('⚠️ Could not complete draft order: ' + e.toString());
-        throw new Error('Draft order created but could not be completed: ' + e.toString());
-      }
-      
-      throw new Error('Failed to complete draft order');
-    } else {
-      Logger.log('Shopify API Error: ' + body);
-      throw new Error('API returned ' + code + ': ' + body.substring(0, 200));
+    if (draftCode !== 201) {
+      Logger.log('❌ Draft Order Error: ' + draftResp.getContentText());
+      throw new Error('Failed to create draft: ' + draftResp.getContentText().substring(0, 200));
     }
     
-  } catch (error) {
-    Logger.log('Failed to call Shopify API: ' + error.toString());
-    throw error;
-  }
-}
-
-// ===== MARK ORDER AS PAID =====
-function markOrderAsPaid(orderId) {
-  const url = 'https://' + SHOPIFY_CONFIG.SHOP_DOMAIN + 
-              '/admin/api/' + SHOPIFY_CONFIG.API_VERSION + 
-              '/orders/' + orderId + '/transactions.json';
-  
-  const payload = {
-    transaction: {
-      kind: 'sale',
-      status: 'success',
-      amount: 'pending'
-    }
-  };
-  
-  const options = {
-    method: 'post',
-    contentType: 'application/json',
-    headers: {
-      'X-Shopify-Access-Token': SHOPIFY_CONFIG.ACCESS_TOKEN
-    },
-    payload: JSON.stringify(payload),
-    muteHttpExceptions: true
-  };
-  
-  try {
-    const response = UrlFetchApp.fetch(url, options);
+    const draftData = JSON.parse(draftResp.getContentText());
+    const draftId = draftData.draft_order.id;
+    const draftTotal = draftData.draft_order.total_price;
     
-    if (response.getResponseCode() === 201) {
-      Logger.log('✓ Order marked as paid');
-    } else {
-      Logger.log('⚠️ Could not mark as paid: ' + response.getContentText());
-    }
-  } catch (error) {
-    Logger.log('⚠️ Error marking order as paid: ' + error.toString());
-  }
-}
-
-// ===== COMPLETE DRAFT ORDER (MARK AS PAID) =====
-function completeDraftOrder(draftOrderId) {
-  const url = 'https://' + SHOPIFY_CONFIG.SHOP_DOMAIN + 
-              '/admin/api/' + SHOPIFY_CONFIG.API_VERSION + 
-              '/draft_orders/' + draftOrderId + '/complete.json';
-  
-  const payload = {
-    payment_pending: false
-  };
-  
-  const options = {
-    method: 'put',
-    contentType: 'application/json',
-    headers: {
-      'X-Shopify-Access-Token': SHOPIFY_CONFIG.ACCESS_TOKEN
-    },
-    payload: JSON.stringify(payload),
-    muteHttpExceptions: true
-  };
-  
-  try {
-    const response = UrlFetchApp.fetch(url, options);
+    Logger.log('✓ Draft created: ' + draftId);
+    Logger.log('✓ Draft total: RM' + draftTotal);
     
-    if (response.getResponseCode() === 200) {
-      const data = JSON.parse(response.getContentText());
-      Logger.log('✓ Draft order completed successfully');
-      return data.draft_order.order_id ? getOrderDetails(data.draft_order.order_id) : null;
-    } else {
-      Logger.log('⚠️ Could not complete draft order: ' + response.getContentText());
-      return null;
+    const diff = Math.abs(parseFloat(draftTotal) - discountedTotal);
+    if (diff > 1.0) {
+      Logger.log('⚠️ WARNING: Price mismatch - Expected RM' + discountedTotal.toFixed(2) + ', Got RM' + draftTotal);
     }
-  } catch (error) {
-    Logger.log('⚠️ Error completing draft order: ' + error.toString());
-    throw error;
-  }
-}
-
-// ===== GET ORDER DETAILS =====
-function getOrderDetails(orderId) {
-  const url = 'https://' + SHOPIFY_CONFIG.SHOP_DOMAIN + 
-              '/admin/api/' + SHOPIFY_CONFIG.API_VERSION + 
-              '/orders/' + orderId + '.json';
-  
-  const options = {
-    method: 'get',
-    headers: {
-      'X-Shopify-Access-Token': SHOPIFY_CONFIG.ACCESS_TOKEN
-    },
-    muteHttpExceptions: true
-  };
-  
-  try {
-    const response = UrlFetchApp.fetch(url, options);
     
-    if (response.getResponseCode() === 200) {
-      const data = JSON.parse(response.getContentText());
-      return data.order;
-    }
-  } catch (error) {
-    Logger.log('⚠️ Could not get order details: ' + error.toString());
-  }
-  
-  return null;
-}
-
-// ===== SET FULFILLMENT ON HOLD =====
-function setFulfillmentOnHold(orderId) {
-  const url = 'https://' + SHOPIFY_CONFIG.SHOP_DOMAIN + 
-              '/admin/api/' + SHOPIFY_CONFIG.API_VERSION + 
-              '/orders/' + orderId + '/fulfillment_orders.json';
-  
-  const options = {
-    method: 'get',
-    headers: {
-      'X-Shopify-Access-Token': SHOPIFY_CONFIG.ACCESS_TOKEN
-    },
-    muteHttpExceptions: true
-  };
-  
-  try {
-    const response = UrlFetchApp.fetch(url, options);
-    
-    if (response.getResponseCode() === 200) {
-      const data = JSON.parse(response.getContentText());
-      
-      if (data.fulfillment_orders && data.fulfillment_orders.length > 0) {
-        const fulfillmentOrderId = data.fulfillment_orders[0].id;
-        
-        const holdUrl = 'https://' + SHOPIFY_CONFIG.SHOP_DOMAIN + 
+    Logger.log('✅ Completing draft order (unpaid)...');
+    const completeUrl = 'https://' + SHOPIFY_CONFIG.SHOP_DOMAIN + 
                        '/admin/api/' + SHOPIFY_CONFIG.API_VERSION + 
-                       '/fulfillment_orders/' + fulfillmentOrderId + '/hold.json';
-        
-        const holdPayload = {
-          fulfillment_hold: {
-            reason: 'awaiting_payment',
-            reason_notes: 'Order on hold - awaiting processing'
-          }
-        };
-        
-        const holdOptions = {
-          method: 'post',
-          contentType: 'application/json',
-          headers: {
-            'X-Shopify-Access-Token': SHOPIFY_CONFIG.ACCESS_TOKEN
-          },
-          payload: JSON.stringify(holdPayload),
-          muteHttpExceptions: true
-        };
-        
-        const holdResponse = UrlFetchApp.fetch(holdUrl, holdOptions);
-        
-        if (holdResponse.getResponseCode() === 200) {
-          Logger.log('✓ Fulfillment set to on-hold');
-        } else {
-          Logger.log('⚠️ Could not set hold: ' + holdResponse.getContentText());
-        }
-      }
+                       '/draft_orders/' + draftId + '/complete.json';
+    
+    const completeOptions = {
+      method: 'put',
+      contentType: 'application/json',
+      headers: {
+        'X-Shopify-Access-Token': SHOPIFY_CONFIG.ACCESS_TOKEN
+      },
+      payload: JSON.stringify({ 
+        payment_pending: true
+      }),
+      muteHttpExceptions: true
+    };
+    
+    const completeResp = UrlFetchApp.fetch(completeUrl, completeOptions);
+    
+    if (completeResp.getResponseCode() !== 200) {
+      throw new Error('Failed to complete draft: ' + completeResp.getContentText().substring(0, 200));
     }
+    
+    const completeData = JSON.parse(completeResp.getContentText());
+    const orderId = completeData.draft_order.order_id;
+    
+    Logger.log('✓ Order created: ' + orderId);
+    
+    Utilities.sleep(1500);
+    
+    const orderUrl = 'https://' + SHOPIFY_CONFIG.SHOP_DOMAIN + 
+                     '/admin/api/' + SHOPIFY_CONFIG.API_VERSION + 
+                     '/orders/' + orderId + '.json';
+    
+    const orderResp = UrlFetchApp.fetch(orderUrl, {
+      method: 'get',
+      headers: { 'X-Shopify-Access-Token': SHOPIFY_CONFIG.ACCESS_TOKEN },
+      muteHttpExceptions: true
+    });
+    
+    if (orderResp.getResponseCode() !== 200) {
+      throw new Error('Failed to retrieve order');
+    }
+    
+    const order = JSON.parse(orderResp.getContentText()).order;
+    
+    Logger.log('✓ Order: ' + order.name);
+    Logger.log('✓ Total: RM' + order.total_price);
+    Logger.log('✓ Initial status: ' + order.financial_status);
+    
+    Logger.log('💳 Recording Stripe payment...');
+    const transUrl = 'https://' + SHOPIFY_CONFIG.SHOP_DOMAIN + 
+                     '/admin/api/' + SHOPIFY_CONFIG.API_VERSION + 
+                     '/orders/' + orderId + '/transactions.json';
+    
+    const transOptions = {
+      method: 'post',
+      contentType: 'application/json',
+      headers: {
+        'X-Shopify-Access-Token': SHOPIFY_CONFIG.ACCESS_TOKEN
+      },
+      payload: JSON.stringify({
+        transaction: {
+          kind: 'sale',
+          status: 'success',
+          amount: order.total_price,
+          gateway: 'stripe',
+          source: 'external',
+          authorization: paymentId,
+          currency: 'MYR'
+        }
+      }),
+      muteHttpExceptions: true
+    };
+    
+    const transResp = UrlFetchApp.fetch(transUrl, transOptions);
+    
+    if (transResp.getResponseCode() === 201) {
+      const transData = JSON.parse(transResp.getContentText());
+      Logger.log('✓ Payment recorded: RM' + transData.transaction.amount);
+      Logger.log('✓ Transaction ID: ' + transData.transaction.id);
+    } else {
+      Logger.log('⚠️ Payment transaction failed: ' + transResp.getContentText());
+      throw new Error('Failed to add payment transaction');
+    }
+    
+    Logger.log('✅ Order ready for Sage 300 sync');
+    
+    return { order: order };
+    
   } catch (error) {
-    Logger.log('⚠️ Error setting fulfillment hold: ' + error.toString());
+    Logger.log('❌ Failed: ' + error.toString());
+    throw error;
   }
 }
 
-// ===== COPY TO ORDER -> SHOPIFY SHEET =====
+// ===== COPY TO SHOPIFY SHEET =====
 function copyToShopifySheet(orderInfo, shopifyOrderId) {
   try {
     const ss = SpreadsheetApp.openById(SHOPIFY_CONFIG.SPREADSHEET_ID);
@@ -832,14 +829,14 @@ function copyToShopifySheet(orderInfo, shopifyOrderId) {
     sheet.appendRow(row);
     SpreadsheetApp.flush();
     
-    Logger.log('✓ Copied to Order -> Shopify sheet');
+    Logger.log('✓ Copied to Shopify sheet');
     
   } catch (error) {
-    Logger.log('⚠️ Could not copy to Shopify sheet: ' + error.toString());
+    Logger.log('⚠️ Could not copy to sheet: ' + error.toString());
   }
 }
 
-// ===== MANUAL PROCESS ALL PENDING =====
+// ===== PROCESS ALL PENDING ORDERS (WITH CONFIGURABLE BATCH LIMIT) =====
 function processAllPendingOrders() {
   const ss = SpreadsheetApp.openById(SHOPIFY_CONFIG.SPREADSHEET_ID);
   const sheet = ss.getSheetByName(SHOPIFY_CONFIG.ORDERS_SHEET);
@@ -857,17 +854,27 @@ function processAllPendingOrders() {
     return;
   }
   
-  const data = sheet.getRange(2, 1, lastRow - 1, 16).getValues();
+  const batchLimit = SHOPIFY_CONFIG.BATCH_LIMIT;
+  
+  Logger.log('📊 Batch limit set to: ' + batchLimit + ' orders');
+  
+  const data = sheet.getRange(2, 1, lastRow - 1, 18).getValues();  // Read up to column R
   let processed = 0;
   let errors = 0;
+  let skipped = 0;
   
   for (let i = 0; i < data.length; i++) {
+    if (processed >= batchLimit) {
+      Logger.log('⏸️ Batch limit reached (' + batchLimit + ' orders processed)');
+      break;
+    }
+    
     const rowIndex = i + 2;
-    const status = String(data[i][13] || '').trim();
-    const shopifyOrderId = data[i][15];
+    const status = String(data[i][13] || '').trim();  // Column N
+    const shopifyOrderId = data[i][15];  // Column P
     
     if (status === 'Pending' && !shopifyOrderId) {
-      Logger.log('\n📦 Processing row ' + rowIndex);
+      Logger.log('\n📦 Processing row ' + rowIndex + ' (' + (processed + 1) + ' of ' + batchLimit + ')');
       try {
         processOrder(sheet, rowIndex, data[i]);
         processed++;
@@ -876,14 +883,31 @@ function processAllPendingOrders() {
         errors++;
         Logger.log('❌ Error on row ' + rowIndex + ': ' + error.toString());
       }
+    } else if (status === 'Pending' && shopifyOrderId) {
+      skipped++;
     }
   }
   
-  Logger.log('\n✅ Processed ' + processed + ' orders, ' + errors + ' errors');
+  Logger.log('\n✅ Batch processing complete!');
+  Logger.log('📊 Summary:');
+  Logger.log('  • Processed: ' + processed + ' orders');
+  Logger.log('  • Errors: ' + errors);
+  Logger.log('  • Skipped (already created): ' + skipped);
+  
+  let message = 'Batch Processing Complete\n\n';
+  message += 'Processed: ' + processed + ' orders\n';
+  message += 'Errors: ' + errors + '\n';
+  if (skipped > 0) {
+    message += 'Skipped: ' + skipped + ' (already created)\n';
+  }
+  message += '\nBatch Limit: ' + batchLimit + ' orders per run';
+  message += '\n\nTo process more orders:';
+  message += '\n1. Change BATCH_LIMIT in config';
+  message += '\n2. Or run this function again';
   
   SpreadsheetApp.getUi().alert(
     'Process Complete',
-    'Processed: ' + processed + ' orders\nErrors: ' + errors + '\n\nCheck the logs for details.',
+    message,
     SpreadsheetApp.getUi().ButtonSet.OK
   );
 }
@@ -901,7 +925,7 @@ function setupShopifyColumns() {
   const lastCol = sheet.getLastColumn();
   const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
   
-  const required = ['Error Message', 'Shopify Order ID'];
+  const required = ['Status', 'Error Message', 'Shopify Order ID'];
   
   for (let i = 0; i < required.length; i++) {
     if (headers.indexOf(required[i]) === -1) {
