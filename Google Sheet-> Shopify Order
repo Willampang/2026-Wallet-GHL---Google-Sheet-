@@ -13,13 +13,12 @@ const SHOPIFY_CONFIG = {
   // Batch Processing Limit - Change this number to process more/fewer orders at once
   BATCH_LIMIT: 5,  // Process 5 orders at a time (change as needed)
   
-  // Wallet Product Variant IDs - Shopify naming format
   WALLETS: {
-    'A款——丰盛款': '47300563599512',
-    'B款——聚财款': '47300563239064',
-    'C款——富豪款': '47300563271832',
-    'D款——带财款': '47300563304600',
-    'E款——吸金款': '47300563337368'
+    'A款——丰盛款': '47357796188312',
+    'B款——聚财款': '47357796221080',
+    'C款——富豪款': '47357796253848',
+    'D款——带财款': '47357796286616',
+    'E款——吸金款': '47357796319384'
   },
   
   // Product Prices - From Shopify JSON
