@@ -1,6 +1,6 @@
 const BDAY_SETTINGS = {
   GMAIL_ADDRESS: 'customercare@mandarin.club',
-  FORM_BASE_URL: 'https://script.google.com/macros/s/AKfycbzMxrnjDSq2u7bnf51WlrTHu-fH93LbIYFYEGx5Kw5LWagMMxpq8SLScNOP1E8dp3WAzg/exec',
+  FORM_BASE_URL: 'https://script.google.com/macros/s/AKfycbzHY85Zx1gaDHZyedN4Sh0G1ZyQ_BbnS4CC9Av2HyZhb1fKvFuKlWiL7DJv8YJZ8M-vdQ/exec',
   SHEET_NAME: 'Orders',
   BATCH_LIMIT: 5,
   SKIP_SINGLE_WALLET: true,
@@ -261,89 +261,96 @@ function sendBdayEmail(name, email, qty, rowId, orderId, formUrl) {
   try {
     Logger.log('📧 Sending email with form URL');
     
-    const subject = '🎁 完成您的' + qty + '个钱包订单 - 请填写生日资料';
+    const subject = '完成您的满金包订单 - 请填写生日资料 (订单 #' + orderId + ')';
     
+    // IMPROVED EMAIL HTML - More legitimate looking, less spammy
     const htmlBody = '<!DOCTYPE html>' +
-      '<html><head><meta charset="UTF-8"><style>' +
-      'body{font-family:Arial,sans-serif;margin:0;padding:0;background:#f5f5f5}' +
-      '.container{max-width:600px;margin:0 auto;background:white}' +
-      '.header{background:#667eea;color:white;padding:30px;text-align:center}' +
-      '.header h1{margin:0;font-size:28px}' +
-      '.header p{margin:5px 0 0 0;font-size:14px}' +
-      '.customer-info{background:#e3f2fd;border-left:4px solid #1976d2;padding:15px;margin:20px}' +
-      '.customer-info p{margin:8px 0;font-size:14px;color:#333}' +
-      '.content{padding:30px 20px}' +
-      '.section{margin:20px 0}' +
-      '.section-title{font-size:16px;font-weight:bold;color:#333;margin-bottom:10px}' +
-      '.requirement{margin:8px 0;font-size:14px;color:#555}' +
-      '.requirement-item{margin-left:20px}' +
-      '.button-container{text-align:center;margin:30px 0}' +
-      '.button{display:inline-block;padding:14px 40px;background:#667eea;color:white;text-decoration:none;border-radius:6px;font-weight:bold;font-size:16px}' +
-      '.button:hover{background:#5568d3}' +
-      '.warning{background:#fff3cd;border-left:4px solid #ffc107;padding:12px;margin:20px;font-size:13px;color:#856404}' +
-      '.footer{background:#f8f8f8;padding:20px;text-align:center;border-top:1px solid #eee;font-size:12px;color:#666}' +
-      '.footer p{margin:5px 0}' +
-      '</style></head><body>' +
-      '<div class="container">' +
-      '<div class="header">' +
-      '<h1>满金包 2026</h1>' +
-      '<p>奇门遁甲 · 招财阵定制</p>' +
-      '</div>' +
-      '<div class="customer-info">' +
-      '<p><strong>👤 客户姓名：</strong>' + name + '</p>' +
-      '<p><strong>🎁 订购数量：</strong>' + qty + ' 个钱包</p>' +
-      '</div>' +
-      '<div class="content">' +
-      '<div class="section">' +
-      '<div class="section-title">你好' + name + '，</div>' +
-      '<p style="font-size:14px;color:#555;line-height:1.6">感谢您的订购！为了为您计算专属的<strong>命宫</strong>和<strong>招财阵</strong>，我们需要您的生辰八字信息。</p>' +
-      '</div>' +
-      '<div class="section">' +
-      '<div class="section-title">📋 请提供以下信息：</div>' +
-      '<div class="requirement-item">' +
-      '<p class="requirement">✓ 出生年月日</p>' +
-      '<p class="requirement">✓ 出生时辰（可选）</p>' +
-      '</div>' +
-      '</div>' +
-      '<div class="button-container">' +
-      '<a href="' + formUrl + '" class="button">👉 马上填写</a>' +
-      '</div>' +
-      '<div class="warning">' +
-      '<p><strong>⏰ 链接有效期：24小时</strong></p>' +
-      '<p>此链接请在24小时内完成填写。完成后可随时通过此链接查看结果。</p>' +
-      '</div>' +
-      '<p style="font-size:13px;color:#666;margin-top:20px">系统将自动通过奇门遁甲算法计算您的命宫，并为您匹配最适合的招财阵。</p>' +
-      '</div>' +
-      '<div class="footer">' +
-      '<p><strong>若有任何疑问，请联系我们：</strong></p>' +
-      '<p>📞 +6013-928 4699</p>' +
-      '<p>📞 +6013-530 8863</p>' +
-      '<p style="margin-top:15px;color:#999">此邮件由满金包官方系统发送，请勿直接回复。</p>' +
-      '</div>' +
-      '</div></body></html>';
+      '<html lang="zh-CN"><head><meta charset="UTF-8">' +
+      '<meta name="viewport" content="width=device-width, initial-scale=1.0">' +
+      '<title>满金包订单确认</title></head><body style="margin:0;padding:0;font-family:Arial,sans-serif;background-color:#f5f5f5">' +
+      '<table width="100%" cellpadding="0" cellspacing="0" style="background-color:#f5f5f5;padding:20px 0">' +
+      '<tr><td align="center">' +
+      '<table width="600" cellpadding="0" cellspacing="0" style="background-color:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.1)">' +
+      
+      // Header
+      '<tr><td style="background:linear-gradient(135deg,#FFD700 0%,#FFA500 100%);padding:30px;text-align:center">' +
+      '<h1 style="margin:0;color:#ffffff;font-size:28px;text-shadow:1px 1px 2px rgba(0,0,0,0.2)">满金包 2026</h1>' +
+      '<p style="margin:8px 0 0 0;color:#ffffff;font-size:14px">奇门遁甲 · 招财阵定制</p>' +
+      '</td></tr>' +
+      
+      // Customer Info
+      '<tr><td style="padding:30px">' +
+      '<table width="100%" cellpadding="0" cellspacing="0" style="background:#f9f9f9;border-left:4px solid #FFD700;padding:15px;border-radius:4px">' +
+      '<tr><td><p style="margin:8px 0;font-size:14px;color:#333"><strong>👤 尊敬的客户：</strong>' + name + '</p>' +
+      '<p style="margin:8px 0;font-size:14px;color:#333"><strong>📦 订单编号：</strong>' + orderId + '</p>' +
+      '<p style="margin:8px 0;font-size:14px;color:#333"><strong>🎁 订购数量：</strong>' + qty + ' 个钱包</p></td></tr>' +
+      '</table>' +
+      '</td></tr>' +
+      
+      // Main Content
+      '<tr><td style="padding:0 30px 20px 30px">' +
+      '<h2 style="color:#333;font-size:18px;margin:0 0 15px 0">感谢您的订购！</h2>' +
+      '<p style="font-size:14px;color:#555;line-height:1.6;margin:0 0 15px 0">为了为您计算专属的<strong>命宫</strong>和<strong>招财阵</strong>，我们需要您提供以下信息：</p>' +
+      '<ul style="font-size:14px;color:#555;line-height:1.8;margin:0 0 20px 20px">' +
+      '<li>出生年月日（必填）</li>' +
+      '<li>出生时辰（选填，但可以提高准确度）</li>' +
+      '</ul>' +
+      '</td></tr>' +
+      
+      // CTA Button
+      '<tr><td style="padding:0 30px 30px 30px;text-align:center">' +
+      '<a href="' + formUrl + '" style="display:inline-block;padding:14px 40px;background:#E63946;color:#ffffff;text-decoration:none;border-radius:6px;font-weight:bold;font-size:16px">马上填写</a>' +
+      '</td></tr>' +
+      
+      // Important Notice
+      '<tr><td style="padding:0 30px 20px 30px">' +
+      '<table width="100%" cellpadding="0" cellspacing="0" style="background:#fff9e6;border-left:4px solid #FFD700;padding:15px;border-radius:4px">' +
+      '<tr><td><p style="margin:0 0 8px 0;font-size:14px;color:#8B4513"><strong>⏰ 重要提示：</strong></p>' +
+      '<p style="margin:0;font-size:13px;color:#8B4513;line-height:1.6">此链接有效期为24小时，请尽快填写。完成后可随时通过此链接查看您的命宫结果。</p></td></tr>' +
+      '</table>' +
+      '</td></tr>' +
+      
+      // Footer
+      '<tr><td style="background:#f9f9f9;padding:20px 30px;border-top:1px solid #e0e0e0;text-align:center">' +
+      '<p style="margin:0 0 10px 0;font-size:13px;color:#666"><strong>客服联系方式</strong></p>' +
+      '<p style="margin:5px 0;font-size:13px;color:#666">📞 +6013-928 4699 | +6013-530 8863</p>' +
+      '<p style="margin:5px 0;font-size:13px;color:#666">📧 customercare@mandarin.club</p>' +
+      '<p style="margin:15px 0 0 0;font-size:12px;color:#999">此邮件由 Mandarin Club 官方系统自动发送</p>' +
+      '</td></tr>' +
+      
+      '</table>' +
+      '</td></tr></table>' +
+      '</body></html>';
     
-    const plainText = '满金包 2026 - 生辰八字信息填写\n\n' +
-      '亲爱的 ' + name + '，\n\n' +
+    const plainText = '满金包 2026 - 订单确认\n\n' +
+      '尊敬的 ' + name + ' 您好，\n\n' +
+      '订单编号：' + orderId + '\n' +
       '订购数量：' + qty + ' 个钱包\n\n' +
       '感谢您的订购！为了为您计算专属的命宫和招财阵，我们需要您的生辰八字信息。\n\n' +
       '请提供以下信息：\n' +
-      '✓ 出生年月日\n' +
-      '✓ 出生时辰（可选）\n\n' +
-      '请点击以下链接填写（24小时内有效）：\n' + formUrl + '\n\n' +
+      '✓ 出生年月日（必填）\n' +
+      '✓ 出生时辰（选填）\n\n' +
+      '请点击以下链接填写：\n' + formUrl + '\n\n' +
       '⏰ 重要提示：\n' +
-      '此链接请在24小时内完成填写。完成后可随时通过此链接查看结果。\n\n' +
-      '若有任何疑问，请联系客服：\n' +
-      '📞 +6013-928 4699\n' +
-      '📞 +6013-530 8863\n\n' +
-      '此邮件由满金包官方系统发送，请勿直接回复。';
+      '此链接有效期为24小时，请尽快完成填写。\n\n' +
+      '客服联系方式：\n' +
+      '📞 +6013-928 4699 / +6013-530 8863\n' +
+      '📧 customercare@mandarin.club\n\n' +
+      '此邮件由 Mandarin Club 官方系统自动发送，请勿直接回复。\n' +
+      '---\n' +
+      'Mandarin Club\n' +
+      'https://mandarin.club';
+    
+    // CRITICAL: Use the actual Gmail account that's authorized
+    const authorizedEmail = Session.getActiveUser().getEmail();
     
     MailApp.sendEmail({
       to: email,
       subject: subject,
       body: plainText,
       htmlBody: htmlBody,
-      name: 'Mandarin Club - 满金包',
-      replyTo: BDAY_SETTINGS.GMAIL_ADDRESS,
+      name: 'Mandarin Club',
+      replyTo: authorizedEmail, // Use authorized email instead
       charset: 'UTF-8',
       noReply: false
     });
@@ -360,7 +367,7 @@ function authorizeBdayEmail() {
     to: Session.getActiveUser().getEmail(),
     subject: '✅ Email Authorization Successful - Mandarin Club',
     body: 'Your Google Apps Script now has permission to send emails!\n\nMandarin Club Birthday Form System',
-    name: 'Mandarin Club - 满金包'
+    name: 'Mandarin Club'
   });
-  Logger.log('✅ Authorization complete!');
+  Logger.log('✅ Authorization complete! Authorized email: ' + Session.getActiveUser().getEmail());
 }
