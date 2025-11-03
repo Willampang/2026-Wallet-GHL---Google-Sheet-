@@ -1,3 +1,4 @@
+//GoldenCard.gs
 const BDAY_SETTINGS = {
   GMAIL_ADDRESS: 'customercare@mandarin.club',
   FORM_BASE_URL: ScriptApp.getService().getUrl(),
