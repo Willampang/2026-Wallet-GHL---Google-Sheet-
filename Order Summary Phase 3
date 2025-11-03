@@ -9,7 +9,7 @@ const SALES_CONFIG = {
   ORDERS_2_START_ROW: 521,  // Start reading from row 448 in Orders_2
   ORDERS_3_START_ROW: 5,     // Start reading from row 5 in Orders_3
   
-  SUMMARY_START_ROW: 35,  // Paste results starting at row 37
+  SUMMARY_START_ROW: 36,  // Paste results starting at row 37
   
   // Get today's date for Orders_2 filter (YYYY-MM-DD format)
   // This will automatically get today's date
