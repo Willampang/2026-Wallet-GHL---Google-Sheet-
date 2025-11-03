@@ -1,0 +1,381 @@
+// ===== SALES SUMMARY CONFIGURATION - PHASE 3 =====
+const SALES_CONFIG = {
+  SPREADSHEET_ID: '1b5On_VvQF-6i634aXhSHwjMIY_m-f2SLhPnBMfM1cJo',
+  ORDERS_2_SHEET: 'Orders_2',    // Orders_2 sheet (for today's sales)
+  ORDERS_3_SHEET: 'Orders_3',    // New Orders_3 sheet (main sheet for Phase 3)
+  SUMMARY_SHEET: 'Sales Summary',
+  
+  // Start rows for each sheet
+  ORDERS_2_START_ROW: 521,  // Start reading from row 448 in Orders_2
+  ORDERS_3_START_ROW: 5,     // Start reading from row 5 in Orders_3
+  
+  SUMMARY_START_ROW: 35,  // Paste results starting at row 37
+  
+  // Get today's date for Orders_2 filter (YYYY-MM-DD format)
+  // This will automatically get today's date
+  get FILTER_DATE() {
+    const today = new Date();
+    return Utilities.formatDate(today, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  },
+  
+  // Display names for the summary report
+  PRODUCT_NAMES: {
+    'A款——丰盛款': 'A.丰盛款（长）',
+    'B款——聚财款': 'B.聚财款',
+    'C款——富豪款': 'C.富豪款（短）',
+    'D款——带财款': 'D.带财款',
+    'E款——吸金款': 'E.吸金款（卡包）'
+  },
+  
+  // Alternate product names mapping (from order format to standard format)
+  ALT_NAMES: {
+    'A款（丰盛款）': 'A款——丰盛款',
+    'B款（聚财款）': 'B款——聚财款',
+    'C款（富豪款）': 'C款——富豪款',
+    'D款（带财款x1）': 'D款——带财款',
+    'E款（吸金款x1）': 'E款——吸金款'
+  },
+  
+  // Bundle definitions: each bundle expands to multiple individual products
+  BUNDLES: {
+    'F款（带财款x1+吸金款x1）': {
+      'D款——带财款': 1,
+      'E款——吸金款': 1
+    },
+    'G款（带财款x2）': {
+      'D款——带财款': 2
+    },
+    'H款（吸金款x2）': {
+      'E款——吸金款': 2
+    }
+  }
+};
+
+// ===== NORMALIZE PRODUCT STRING =====
+function normalizeProductString(str) {
+  if (!str) return '';
+  return str.replace(/\s+（/g, '（')
+    .replace(/）\s+/g, '）')
+    .replace(/\s+——/g, '——')
+    .replace(/——\s+/g, '——')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// ===== SMART SPLIT =====
+function smartSplit(str) {
+  const parts = [];
+  let currentPart = '';
+  let depth = 0;
+  
+  for (let i = 0; i < str.length; i++) {
+    const char = str[i];
+    
+    if (char === '（' || char === '(') {
+      depth++;
+      currentPart += char;
+    } else if (char === '）' || char === ')') {
+      depth--;
+      currentPart += char;
+    } else if (char === '+' && depth === 0) {
+      if (currentPart.trim()) {
+        parts.push(currentPart.trim());
+      }
+      currentPart = '';
+    } else {
+      currentPart += char;
+    }
+  }
+  
+  if (currentPart.trim()) {
+    parts.push(currentPart.trim());
+  }
+  
+  return parts;
+}
+
+// ===== PARSE PRODUCTS FOR SUMMARY =====
+function parseProductsForSummary(orderSummary) {
+  const stockCount = {
+    'A款——丰盛款': 0, 
+    'B款——聚财款': 0, 
+    'C款——富豪款': 0,
+    'D款——带财款': 0, 
+    'E款——吸金款': 0
+  };
+  
+  const normalized = normalizeProductString(orderSummary);
+  const parts = smartSplit(normalized);
+
+  for (const part of parts) {
+    let matched = false;
+    
+    // Check if part is a BUNDLE
+    for (const bundleName in SALES_CONFIG.BUNDLES) {
+      const normBundle = normalizeProductString(bundleName);
+      
+      if (part.indexOf(normBundle) === 0) {
+        const afterBundle = part.substring(normBundle.length).trim();
+        let qty = 1;
+        
+        const qtyMatch = afterBundle.match(/^[xX×]\s*([0-9]+)/);
+        if (qtyMatch) {
+          qty = parseInt(qtyMatch[1]);
+        }
+        
+        for (const product in SALES_CONFIG.BUNDLES[bundleName]) {
+          stockCount[product] += SALES_CONFIG.BUNDLES[bundleName][product] * qty;
+        }
+        matched = true;
+        break;
+      }
+    }
+
+    // Check ALTERNATE NAMES
+    if (!matched) {
+      for (const alt in SALES_CONFIG.ALT_NAMES) {
+        const targetKey = SALES_CONFIG.ALT_NAMES[alt];
+        const na = normalizeProductString(alt);
+        
+        if (part.indexOf(na) === 0) {
+          const match = part.match(/[xX×]\s*([0-9]+)/);
+          const qty = match ? parseInt(match[1]) : 1;
+          stockCount[targetKey] += qty;
+          matched = true;
+          break;
+        }
+      }
+      
+      // Check MAIN PRODUCT NAMES
+      if (!matched) {
+        for (const k in stockCount) {
+          const nk = normalizeProductString(k);
+          if (part.indexOf(nk) === 0) {
+            const match = part.match(/[xX×]\s*([0-9]+)/);
+            const qty = match ? parseInt(match[1]) : 1;
+            stockCount[k] += qty;
+            break;
+          }
+        }
+      }
+    }
+  }
+  
+  return stockCount;
+}
+
+// ===== READ ORDERS FROM A SHEET =====
+function readOrdersFromSheet(sheet, startRow, dateFilter = null) {
+  const orders = [];
+  const lastRow = sheet.getLastRow();
+  
+  if (lastRow < startRow) {
+    return orders;
+  }
+
+  const numRows = lastRow - startRow + 1;
+  const data = sheet.getRange(startRow, 1, numRows, 16).getValues();
+
+  for (const row of data) {
+    const status = String(row[13] || '').trim(); // Column N
+    const orderSummary = String(row[11] || '').trim(); // Column L
+    const totalPrice = parseFloat(String(row[12] || '').replace(/[^\d.]/g, '')) || 0; // Column M
+    const platform = String(row[9] || 'GHL').trim(); // Column J
+    const dateRaw = row[0]; // Column A
+    
+    // Only process valid orders
+    if (!dateRaw || !orderSummary || (status !== 'Pending' && status !== 'Created')) continue;
+    
+    const orderDate = Utilities.formatDate(new Date(dateRaw), Session.getScriptTimeZone(), 'yyyy-MM-dd');
+    
+    // Apply date filter if specified
+    if (dateFilter && orderDate !== dateFilter) continue;
+
+    orders.push({
+      date: orderDate,
+      orderSummary: orderSummary,
+      totalPrice: totalPrice,
+      platform: platform
+    });
+  }
+
+  return orders;
+}
+
+// ===== MAIN FUNCTION =====
+function generateSalesSummaryPhase3() {
+  const ss = SpreadsheetApp.openById(SALES_CONFIG.SPREADSHEET_ID);
+  
+  // Get both sheets
+  const orders2Sheet = ss.getSheetByName(SALES_CONFIG.ORDERS_2_SHEET);
+  const orders3Sheet = ss.getSheetByName(SALES_CONFIG.ORDERS_3_SHEET);
+  
+  if (!orders2Sheet) throw new Error('Orders_2 sheet not found!');
+  if (!orders3Sheet) throw new Error('Orders_3 sheet not found!');
+
+  // Get today's date for filtering
+  const todayDate = SALES_CONFIG.FILTER_DATE;
+  
+  // Read orders from both sheets
+  // Orders_2: Only today's sales starting from row 448
+  const ordersFromOrders2 = readOrdersFromSheet(orders2Sheet, SALES_CONFIG.ORDERS_2_START_ROW, todayDate);
+  
+  // Orders_3: All dates starting from row 5
+  const ordersFromOrders3 = readOrdersFromSheet(orders3Sheet, SALES_CONFIG.ORDERS_3_START_ROW, null);
+  
+  // Combine all orders
+  const allOrders = [...ordersFromOrders2, ...ordersFromOrders3];
+  
+  if (allOrders.length === 0) {
+    SpreadsheetApp.getUi().alert('No orders found.');
+    return;
+  }
+
+  const summarySheet = ss.getSheetByName(SALES_CONFIG.SUMMARY_SHEET) || ss.insertSheet(SALES_CONFIG.SUMMARY_SHEET);
+
+  // === Phase 3 Yellow Header ===
+  const now = new Date();
+  const dateStr = Utilities.formatDate(now, Session.getScriptTimeZone(), 'dd MMM yyyy');
+  const timeStr = Utilities.formatDate(now, Session.getScriptTimeZone(), 'h:mm a');
+
+  const startRow = SALES_CONFIG.SUMMARY_START_ROW;
+
+  summarySheet.getRange(startRow, 1, 1, 7).merge().setValue('Phase 3 (4th day onwards)')
+    .setBackground('#FFFF00').setFontWeight('bold').setHorizontalAlignment('center').setFontSize(14);
+  summarySheet.getRange(startRow + 1, 1, 1, 7).merge().setValue(`${dateStr} Wallet Sales Update (${timeStr})`)
+    .setBackground('#FFFF00').setFontWeight('bold').setHorizontalAlignment('center').setFontSize(14);
+
+  // Column headers
+  const headers = [
+    'Platform',
+    SALES_CONFIG.PRODUCT_NAMES['A款——丰盛款'],
+    SALES_CONFIG.PRODUCT_NAMES['B款——聚财款'],
+    SALES_CONFIG.PRODUCT_NAMES['C款——富豪款'],
+    SALES_CONFIG.PRODUCT_NAMES['D款——带财款'],
+    SALES_CONFIG.PRODUCT_NAMES['E款——吸金款'],
+    'Total Sales'
+  ];
+  summarySheet.getRange(startRow + 2, 1, 1, 7).setValues([headers])
+    .setBackground('#FFFF00').setFontWeight('bold').setHorizontalAlignment('center')
+    .setBorder(true, true, true, true, true, true);
+
+  // === Platform summary ===
+  const platformSummary = {
+    'GHL': { 
+      'A款——丰盛款': 0, 'B款——聚财款': 0, 'C款——富豪款': 0, 
+      'D款——带财款': 0, 'E款——吸金款': 0,
+      totalSales: 0 
+    },
+    'Shopify (VIP)': { 
+      'A款——丰盛款': 0, 'B款——聚财款': 0, 'C款——富豪款': 0, 
+      'D款——带财款': 0, 'E款——吸金款': 0,
+      totalSales: 0 
+    }
+  };
+
+  const dailySummary = {};
+
+  // Process each order
+  for (const order of allOrders) {
+    const platformKey = order.platform.toLowerCase().includes('shopify') ? 'Shopify (VIP)' : 'GHL';
+    const stockCount = parseProductsForSummary(order.orderSummary);
+
+    // Accumulate platform totals
+    for (const k in stockCount) {
+      platformSummary[platformKey][k] += stockCount[k];
+    }
+    platformSummary[platformKey].totalSales += order.totalPrice;
+
+    // Daily accumulation
+    if (!dailySummary[order.date]) {
+      dailySummary[order.date] = { 
+        'A款——丰盛款': 0, 'B款——聚财款': 0, 'C款——富豪款': 0,
+        'D款——带财款': 0, 'E款——吸金款': 0,
+        totalSales: 0 
+      };
+    }
+    for (const k in stockCount) {
+      dailySummary[order.date][k] += stockCount[k];
+    }
+    dailySummary[order.date].totalSales += order.totalPrice;
+  }
+
+  // Calculate grand totals
+  const totals = {
+    'A款——丰盛款': platformSummary['GHL']['A款——丰盛款'] + platformSummary['Shopify (VIP)']['A款——丰盛款'],
+    'B款——聚财款': platformSummary['GHL']['B款——聚财款'] + platformSummary['Shopify (VIP)']['B款——聚财款'],
+    'C款——富豪款': platformSummary['GHL']['C款——富豪款'] + platformSummary['Shopify (VIP)']['C款——富豪款'],
+    'D款——带财款': platformSummary['GHL']['D款——带财款'] + platformSummary['Shopify (VIP)']['D款——带财款'],
+    'E款——吸金款': platformSummary['GHL']['E款——吸金款'] + platformSummary['Shopify (VIP)']['E款——吸金款'],
+    totalSales: platformSummary['GHL'].totalSales + platformSummary['Shopify (VIP)'].totalSales
+  };
+
+  // === Write summary table ===
+  summarySheet.getRange(startRow + 3, 1, 1, 7).setValues([[
+    'GHL',
+    platformSummary['GHL']['A款——丰盛款'],
+    platformSummary['GHL']['B款——聚财款'],
+    platformSummary['GHL']['C款——富豪款'],
+    platformSummary['GHL']['D款——带财款'],
+    platformSummary['GHL']['E款——吸金款'],
+    platformSummary['GHL'].totalSales
+  ]]).setBorder(true, true, true, true, true, true);
+
+  summarySheet.getRange(startRow + 4, 1, 1, 7).setValues([[
+    'Shopify (VIP)',
+    platformSummary['Shopify (VIP)']['A款——丰盛款'],
+    platformSummary['Shopify (VIP)']['B款——聚财款'],
+    platformSummary['Shopify (VIP)']['C款——富豪款'],
+    platformSummary['Shopify (VIP)']['D款——带财款'],
+    platformSummary['Shopify (VIP)']['E款——吸金款'],
+    platformSummary['Shopify (VIP)'].totalSales
+  ]]).setBorder(true, true, true, true, true, true);
+
+  summarySheet.getRange(startRow + 5, 1, 1, 7).setValues([[
+    'Total:',
+    totals['A款——丰盛款'],
+    totals['B款——聚财款'],
+    totals['C款——富豪款'],
+    totals['D款——带财款'],
+    totals['E款——吸金款'],
+    totals.totalSales
+  ]]).setBackground('#FFD966').setFontWeight('bold').setBorder(true, true, true, true, true, true);
+
+  // Format currency columns
+  summarySheet.getRange(`G${startRow + 3}:G${startRow + 5}`).setNumberFormat('#,##0.00');
+  summarySheet.getRange(`A${startRow + 2}:G${startRow + 5}`).setHorizontalAlignment('center');
+  summarySheet.setColumnWidths(1, 7, 120);
+
+  // === Append daily breakdown ===
+  let r = startRow + 7;
+  const sortedDates = Object.keys(dailySummary).sort();
+
+  for (const d of sortedDates) {
+    const day = dailySummary[d];
+    const rowVals = [
+      `📅 ${d} (Daily Sales)`,
+      day['A款——丰盛款'],
+      day['B款——聚财款'],
+      day['C款——富豪款'],
+      day['D款——带财款'],
+      day['E款——吸金款'],
+      day.totalSales
+    ];
+    summarySheet.getRange(r, 1, 1, 7).setValues([rowVals])
+      .setFontWeight('bold')
+      .setBackground('#D9E2F3')
+      .setBorder(true, true, true, true, true, true)
+      .setHorizontalAlignment('center');
+    summarySheet.getRange(`G${r}`).setNumberFormat('#,##0.00');
+    r++;
+  }
+
+  const msg = `✅ Phase 3 Sales summary generated successfully!\n\n` +
+              `📊 Data Sources:\n` +
+              `• Orders_2 sheet: ${ordersFromOrders2.length} orders (Today ${todayDate} only, from row 448)\n` +
+              `• Orders_3 sheet: ${ordersFromOrders3.length} orders (all dates, from row 5)\n` +
+              `• Total: ${allOrders.length} orders processed\n\n` +
+              `📍 Summary location: Row ${SALES_CONFIG.SUMMARY_START_ROW}`;
+  
+  SpreadsheetApp.getUi().alert(msg);
+}
