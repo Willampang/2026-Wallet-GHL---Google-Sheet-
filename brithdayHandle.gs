@@ -22,11 +22,23 @@ function doGet(e) {
   }
   
   const rowId = parseInt(row);
+  // CORRECT: Form access token (Golden Card Link) is in Column S (19)
   const storedLink = sh.getRange(rowId, 19).getValue();
+  // Golden Card Status is in Column Q (17)
   const goldenCardStatus = sh.getRange(rowId, 17).getValue();
+  // Golden Card is in Column R (18)
   const goldenCardData = sh.getRange(rowId, 18).getValue();
   
-  if (!storedLink || !storedLink.includes(token)) {
+  // Extract token from stored link for comparison
+  if (!storedLink) {
+    return HtmlService.createHtmlOutput(createErrorPage('此链接已失效或无效'));
+  }
+  
+  // Check if the submitted token matches the one in the stored URL
+  const urlMatch = storedLink.match(/token=([^&]+)/);
+  const storedToken = urlMatch ? decodeURIComponent(urlMatch[1]) : null;
+  
+  if (!storedToken || storedToken !== token) {
     return HtmlService.createHtmlOutput(createErrorPage('此链接已失效或无效'));
   }
   
@@ -45,10 +57,24 @@ function processFormSubmission(data) {
     const rowId = parseInt(data.rowId);
     const submittedToken = data.token || '';
     
+    // CORRECT: Form access token (Golden Card Link) is in Column S (19)
     const storedLink = sh.getRange(rowId, 19).getValue();
+    // Golden Card Status is in Column Q (17)
     const goldenCardStatus = sh.getRange(rowId, 17).getValue();
     
-    if (!storedLink || !storedLink.includes(submittedToken)) {
+    // Extract token from stored link for comparison
+    if (!storedLink) {
+      return {
+        success: false,
+        error: '访问令牌无效，请重新获取链接'
+      };
+    }
+    
+    // Check if the submitted token matches the one in the stored URL
+    const urlMatch = storedLink.match(/token=([^&]+)/);
+    const storedToken = urlMatch ? decodeURIComponent(urlMatch[1]) : null;
+    
+    if (!storedToken || storedToken !== submittedToken) {
       return {
         success: false,
         error: '访问令牌无效，请重新获取链接'
@@ -98,7 +124,9 @@ function processFormSubmission(data) {
     const detailedInfoJson = JSON.stringify(detailedInfo);
     cache.put(cacheKey, detailedInfoJson, 86400);
     
+    // Column Q (17) = Golden Card Status
     sh.getRange(rowId, 17).setValue('Complete');
+    // Column R (18) = Golden Card
     sh.getRange(rowId, 18).setValue(formattedCards);
     
     return {
