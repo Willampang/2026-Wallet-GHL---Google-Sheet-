@@ -21,10 +21,10 @@ const BDAY_SETTINGS = {
     TOTAL_PRICE: 13,
     STATUS: 14,
     ERROR_MESSAGE: 15,
-    SHOPIFY_ORDER_ID: 16,
-    GOLDEN_CARD_STATUS: 17,
-    GOLDEN_CARD: 18,
-    FORM_ACCESS_TOKEN: 19
+    SHOPIFY_ORDER_ID: 16,    // Column P - Shopify Order ID
+    GOLDEN_CARD_STATUS: 17,  // Column Q - Golden Card Status
+    GOLDEN_CARD: 18,         // Column R - Golden Card
+    GOLDEN_CARD_LINK: 19     // Column S - Golden Card Link (Form Access Token)
   }
 };
 
@@ -109,13 +109,14 @@ function processNextBdayOrder() {
         const name = sh.getRange(i, BDAY_SETTINGS.COLUMNS.NAME).getValue();
         const email = sh.getRange(i, BDAY_SETTINGS.COLUMNS.EMAIL).getValue();
         const orderSummary = sh.getRange(i, BDAY_SETTINGS.COLUMNS.ORDER_SUMMARY).getValue();
-        const orderId = sh.getRange(i, BDAY_SETTINGS.COLUMNS.ORDER_ID).getValue();
+        // CORRECT: Using Column P (16) for Shopify Order ID
+        const shopifyOrderId = sh.getRange(i, BDAY_SETTINGS.COLUMNS.SHOPIFY_ORDER_ID).getValue();
         
         const qty = smartSplitQty(orderSummary);
         
-        if (name && email && qty > 0) {
+        if (name && email && qty > 0 && shopifyOrderId) {
           Logger.log('📧 Processing next pending order - Row ' + i);
-          Logger.log('   Order: ' + orderId + ' - ' + name + ' (Qty: ' + qty + ')');
+          Logger.log('   Shopify Order: ' + shopifyOrderId + ' - ' + name + ' (Qty: ' + qty + ')');
           
           if (BDAY_SETTINGS.SKIP_SINGLE_WALLET && qty === 1) {
             sh.getRange(i, BDAY_SETTINGS.COLUMNS.GOLDEN_CARD_STATUS).setValue('Skipped');
@@ -124,12 +125,13 @@ function processNextBdayOrder() {
             return;
           }
           
-          const token = generateAccessToken(i, orderId);
-          const formUrl = generateFormUrl(name, qty, i, orderId, token);
+          const token = generateAccessToken(i, shopifyOrderId);
+          const formUrl = generateFormUrl(name, qty, i, shopifyOrderId, token);
           
-          if (sendBdayEmail(name, email, qty, i, orderId, formUrl)) {
+          if (sendBdayEmail(name, email, qty, i, shopifyOrderId, formUrl)) {
             sh.getRange(i, BDAY_SETTINGS.COLUMNS.GOLDEN_CARD_STATUS).setValue('Pending');
-            sh.getRange(i, BDAY_SETTINGS.COLUMNS.FORM_ACCESS_TOKEN).setValue(formUrl);
+            // CORRECT: Storing form URL in Column S (19) - Golden Card Link
+            sh.getRange(i, BDAY_SETTINGS.COLUMNS.GOLDEN_CARD_LINK).setValue(formUrl);
             Logger.log('✅ Email sent to ' + email);
           } else {
             sh.getRange(i, BDAY_SETTINGS.COLUMNS.ERROR_MESSAGE).setValue('Email Failed');
@@ -137,6 +139,8 @@ function processNextBdayOrder() {
           }
           
           return;
+        } else {
+          Logger.log('⚠️ Row ' + i + ' missing required data (name, email, qty>0, or Shopify Order ID)');
         }
       }
     }
@@ -196,14 +200,15 @@ function processAllBdayOrders() {
         const name = sh.getRange(i, BDAY_SETTINGS.COLUMNS.NAME).getValue();
         const email = sh.getRange(i, BDAY_SETTINGS.COLUMNS.EMAIL).getValue();
         const orderSummary = sh.getRange(i, BDAY_SETTINGS.COLUMNS.ORDER_SUMMARY).getValue();
-        const orderId = sh.getRange(i, BDAY_SETTINGS.COLUMNS.ORDER_ID).getValue();
+        // CORRECT: Using Column P (16) for Shopify Order ID
+        const shopifyOrderId = sh.getRange(i, BDAY_SETTINGS.COLUMNS.SHOPIFY_ORDER_ID).getValue();
         
         const qty = smartSplitQty(orderSummary);
         
-        if (name && email && qty > 0) {
+        if (name && email && qty > 0 && shopifyOrderId) {
           if (BDAY_SETTINGS.SKIP_SINGLE_WALLET && qty === 1) {
             Logger.log('\n⏭️ Skipping row ' + i + ' (single wallet order)');
-            Logger.log('   Order: ' + orderId + ' - ' + name + ' (Qty: ' + qty + ')');
+            Logger.log('   Shopify Order: ' + shopifyOrderId + ' - ' + name + ' (Qty: ' + qty + ')');
             sh.getRange(i, BDAY_SETTINGS.COLUMNS.GOLDEN_CARD_STATUS).setValue('Skipped');
             sh.getRange(i, BDAY_SETTINGS.COLUMNS.GOLDEN_CARD).setValue('N/A - Single Wallet');
             singleWalletSkipped++;
@@ -211,15 +216,16 @@ function processAllBdayOrders() {
           }
           
           Logger.log('\n📧 Processing row ' + i + ' (' + (processed + 1) + ' of ' + batchLimit + ')');
-          Logger.log('   Order: ' + orderId + ' - ' + name + ' (Qty: ' + qty + ')');
+          Logger.log('   Shopify Order: ' + shopifyOrderId + ' - ' + name + ' (Qty: ' + qty + ')');
           
           try {
-            const token = generateAccessToken(i, orderId);
-            const formUrl = generateFormUrl(name, qty, i, orderId, token);
+            const token = generateAccessToken(i, shopifyOrderId);
+            const formUrl = generateFormUrl(name, qty, i, shopifyOrderId, token);
             
-            if (sendBdayEmail(name, email, qty, i, orderId, formUrl)) {
+            if (sendBdayEmail(name, email, qty, i, shopifyOrderId, formUrl)) {
               sh.getRange(i, BDAY_SETTINGS.COLUMNS.GOLDEN_CARD_STATUS).setValue('Pending');
-              sh.getRange(i, BDAY_SETTINGS.COLUMNS.FORM_ACCESS_TOKEN).setValue(formUrl);
+              // CORRECT: Storing form URL in Column S (19) - Golden Card Link
+              sh.getRange(i, BDAY_SETTINGS.COLUMNS.GOLDEN_CARD_LINK).setValue(formUrl);
               Logger.log('✅ Email sent to ' + email);
               processed++;
               Utilities.sleep(1000);
@@ -233,6 +239,8 @@ function processAllBdayOrders() {
             Logger.log('❌ Error on row ' + i + ': ' + error);
             sh.getRange(i, BDAY_SETTINGS.COLUMNS.ERROR_MESSAGE).setValue('Error: ' + error.toString());
           }
+        } else {
+          Logger.log('⚠️ Row ' + i + ' missing required data (name, email, qty>0, or Shopify Order ID)');
         }
       } else if (goldenCardStatus === 'Pending' || goldenCardStatus === 'Complete' || goldenCardStatus === 'Skipped') {
         skipped++;
