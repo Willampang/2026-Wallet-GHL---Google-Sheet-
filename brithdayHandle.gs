@@ -4,9 +4,9 @@ const DIZHI = ['子', '丑', '寅', '卯', '辰', '巳', '午', '未', '申', '�
 const BAGONG = ['离', '坤', '兑', '乾', '坎', '艮', '震', '巽'];
 
 // ============================================================
-// SHOPIFY CONFIGURATION
+// SHOPIFY CONFIGURATION FOR BIRTHDAY HANDLER
 // ============================================================
-const SHOPIFY_CONFIG = {
+const BDAY_SHOPIFY_CONFIG = {
   SHOP_URL: 'fsr2021.myshopify.com',
   ACCESS_TOKEN: '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',
   API_VERSION: '2024-01'
@@ -239,12 +239,12 @@ function addGoldenCardToShopifyOrder(orderIdentifier, goldenCards) {
 function convertOrderNameToNumericId(orderName) {
   try {
     const cleanOrderName = orderName.replace('#', '');
-    const url = 'https://' + SHOPIFY_CONFIG.SHOP_URL + '/admin/api/' + SHOPIFY_CONFIG.API_VERSION + '/orders.json?name=' + encodeURIComponent(cleanOrderName) + '&status=any';
+    const url = 'https://' + BDAY_SHOPIFY_CONFIG.SHOP_URL + '/admin/api/' + BDAY_SHOPIFY_CONFIG.API_VERSION + '/orders.json?name=' + encodeURIComponent(cleanOrderName) + '&status=any';
     
     const response = UrlFetchApp.fetch(url, {
       'method': 'get',
       'headers': {
-        'X-Shopify-Access-Token': SHOPIFY_CONFIG.ACCESS_TOKEN,
+        'X-Shopify-Access-Token': BDAY_SHOPIFY_CONFIG.ACCESS_TOKEN,
         'Content-Type': 'application/json'
       },
       'muteHttpExceptions': true
@@ -273,12 +273,12 @@ function convertOrderNameToNumericId(orderName) {
 
 function executeGraphQLMutation(mutation, variables) {
   try {
-    const url = 'https://' + SHOPIFY_CONFIG.SHOP_URL + '/admin/api/' + SHOPIFY_CONFIG.API_VERSION + '/graphql.json';
+    const url = 'https://' + BDAY_SHOPIFY_CONFIG.SHOP_URL + '/admin/api/' + BDAY_SHOPIFY_CONFIG.API_VERSION + '/graphql.json';
     
     const response = UrlFetchApp.fetch(url, {
       'method': 'post',
       'headers': {
-        'X-Shopify-Access-Token': SHOPIFY_CONFIG.ACCESS_TOKEN,
+        'X-Shopify-Access-Token': BDAY_SHOPIFY_CONFIG.ACCESS_TOKEN,
         'Content-Type': 'application/json'
       },
       'payload': JSON.stringify({ query: mutation, variables: variables }),
