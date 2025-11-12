@@ -1,4 +1,4 @@
-//birthdayHandle.gs - CLEAN VERSION
+//birthdayHandle.gs - CLEAN VERSION (Recipients can be selected multiple times)
 const TIANGAN = ['甲', '乙', '丙', '丁', '戊', '己', '庚', '辛', '壬', '癸'];
 const DIZHI = ['子', '丑', '寅', '卯', '辰', '巳', '午', '未', '申', '酉', '戌', '亥'];
 const BAGONG = ['离', '坤', '兑', '乾', '坎', '艮', '震', '巽'];
@@ -26,11 +26,9 @@ const GOLDEN_CARD_VARIANTS = {
 // ============================================================
 // WEB APP HANDLERS
 // ============================================================
-
 function doGet(e) {
   const p = e.parameter;
   const name = p.name || '';
-  const qty = p.qty || '1';
   const row = p.row || '';
   const orderId = p.order || '';
   const token = p.token || '';
@@ -51,6 +49,7 @@ function doGet(e) {
   const storedLink = sh.getRange(rowId, 19).getValue();
   const goldenCardStatus = sh.getRange(rowId, 17).getValue();
   const goldenCardData = sh.getRange(rowId, 18).getValue();
+  const orderSummary = sh.getRange(rowId, 12).getValue();
   
   if (!storedLink) {
     return HtmlService.createHtmlOutput(createErrorPage('此链接已失效或无效'));
@@ -67,7 +66,87 @@ function doGet(e) {
     return createResultsPage(name, goldenCardData, rowId, sh, sheetName);
   }
   
-  return createBirthdayForm(name, qty, row, orderId, token, sheetName);
+  // Calculate actual wallet quantity from Order Summary
+  const actualQty = smartSplitQty(orderSummary);
+  Logger.log('📊 Actual wallet quantity from Order Summary: ' + actualQty);
+  
+  return createBirthdayForm(name, actualQty, row, orderId, token, sheetName);
+}
+
+function smartSplit(str) {
+  const parts = [];
+  let currentPart = '';
+  let depth = 0;
+  
+  for (let i = 0; i < str.length; i++) {
+    const char = str[i];
+    
+    if (char === '（' || char === '(') {
+      depth++;
+      currentPart += char;
+    } else if (char === '）' || char === ')') {
+      depth--;
+      currentPart += char;
+    } else if (char === '+' && depth === 0) {
+      if (currentPart.trim()) {
+        parts.push(currentPart.trim());
+      }
+      currentPart = '';
+    } else {
+      currentPart += char;
+    }
+  }
+  
+  if (currentPart.trim()) {
+    parts.push(currentPart.trim());
+  }
+  
+  return parts;
+}
+
+function smartSplitQty(orderSummary) {
+  if (!orderSummary || orderSummary === '') {
+    return 0;
+  }
+  
+  let totalQty = 0;
+  const parts = smartSplit(orderSummary);
+  
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i].trim();
+    
+    // Check for bundle products
+    let walletCount = 0;
+    
+    // F款: 带财款x1+吸金款x1 = 2 wallets (D + E)
+    if (part.includes('F款') && part.includes('带财款') && part.includes('吸金款')) {
+      walletCount = 2;
+      Logger.log('   🎁 Bundle F款 detected: 2 wallets (D + E)');
+    }
+    // G款: 带财款x2 = 2 wallets (D x2)
+    else if (part.includes('G款') && part.includes('带财款x2')) {
+      walletCount = 2;
+      Logger.log('   🎁 Bundle G款 detected: 2 wallets (D x2)');
+    }
+    // H款: 吸金款x2 = 2 wallets (E x2)
+    else if (part.includes('H款') && part.includes('吸金款x2')) {
+      walletCount = 2;
+      Logger.log('   🎁 Bundle H款 detected: 2 wallets (E x2)');
+    }
+    // Regular products: extract quantity from "x数字"
+    else {
+      const matches = part.match(/[xX×]\s*(\d+)\s*$/);
+      if (matches && matches[1]) {
+        walletCount = parseInt(matches[1]);
+      }
+    }
+    
+    totalQty += walletCount;
+    Logger.log('   📦 Found: ' + part + ' -> Qty: ' + walletCount);
+  }
+  
+  Logger.log('📊 Total wallets detected: ' + totalQty);
+  return totalQty;
 }
 
 function processFormSubmission(data) {
@@ -482,7 +561,7 @@ function createBirthdayForm(name, qty, row, orderId, token, sheetName) {
     formGroups += '<div class="wallet-group"><div class="wallet-header"><h3>#【奇门遁甲 招财阵】' + i + '</h3></div><div class="form-group"><label>👤 这个钱包是给谁使用的?</label><select id="recipient' + i + '" required><option value="">请选择...</option><option value="本人">本人 (Myself)</option><option value="爸爸">爸爸 (Father)</option><option value="妈妈">妈妈 (Mother)</option><option value="孩子">孩子 (Child)</option><option value="配偶">配偶 (Spouse)</option><option value="朋友">朋友 (Friend)</option><option value="其他">其他 (Other)</option></select></div><div class="form-group"><label>📅 出生日期</label><input type="date" id="birthday' + i + '" required></div><div class="form-group"><label>🕐 出生时间 (可选)</label><input type="time" id="birthtime' + i + '"><small style="color:#666;display:block;margin-top:5px;">如果不知道准确时间，可以留空</small></div></div>';
   }
   
-  return HtmlService.createHtmlOutput('<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>满金包 - 生辰八字登记</title><style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:"Microsoft YaHei",Arial,sans-serif;background:#cca983;min-height:100vh;padding:20px}.container{max-width:600px;margin:0 auto;background:white;border-radius:20px;box-shadow:0 20px 60px rgba(0,0,0,0.3);overflow:hidden}.header{background:linear-gradient(135deg,#8a4f19 0%,#a0681f 100%);color:white;padding:40px 30px;text-align:center}.header h1{font-size:48px;margin:0;font-weight:bold;letter-spacing:8px}.header p{margin:12px 0 0 0;font-size:18px;letter-spacing:3px}.customer-info{background:#b88f51;border-left:4px solid #946c36;padding:15px;margin:15px;border-radius:6px}.customer-info p{margin:8px 0;font-size:14px;color:white;font-weight:500}.security-warning{background:#fff9e6;border-left:4px solid #946c36;padding:12px 15px;margin:15px;border-radius:6px;font-size:13px}.security-warning p{margin:6px 0;color:#333}.form-section{padding:30px}.wallet-group{background:white;padding:25px;border-radius:10px;margin-bottom:20px;border:2px solid #b88f51}.wallet-header{border-bottom:3px solid #b88f51;padding-bottom:12px;margin-bottom:18px}.wallet-header h3{color:#542e10;font-size:16px;font-weight:bold}.form-group{margin-bottom:20px}label{display:block;font-weight:600;margin-bottom:8px;color:#542e10;font-size:15px}input,select{width:100%;padding:12px;border:2px solid #ddd;border-radius:8px;font-size:15px;background:white}input:focus,select:focus{outline:none;border-color:#b88f51;box-shadow:0 0 6px rgba(184,143,81,0.6)}.submit-btn{width:100%;padding:18px;background:#E63946;color:white;border:none;border-radius:10px;font-size:24px;font-weight:bold;cursor:pointer;margin-top:15px;transition:background 0.3s}.submit-btn:hover{background:#D62828;transform:translateY(-2px);box-shadow:0 6px 16px rgba(230,57,70,0.3)}.submit-btn:disabled{background:#ccc;cursor:not-allowed;transform:none}.loading-overlay{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.8);z-index:9999;justify-content:center;align-items:center}.loading-container{display:flex;flex-direction:column;align-items:center;justify-content:center}.spinner{width:60px;height:60px;border:4px solid rgba(255,255,255,0.3);border-top:4px solid white;border-radius:50%;animation:spin 1s linear infinite}.progress-bar{width:350px;height:10px;background:rgba(255,255,255,0.3);border-radius:10px;overflow:hidden;margin:25px auto}.progress-fill{height:100%;background:linear-gradient(90deg,#b88f51,#946c36,#542e10);border-radius:10px;animation:progress 1.5s ease-out forwards}.loading-text{color:white;font-size:18px;margin-top:25px;font-weight:bold}@keyframes spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}@keyframes progress{0%{width:0%}100%{width:100%}}</style></head><body><div class="loading-overlay" id="loadingOverlay"><div class="loading-container"><div class="spinner"></div><div class="progress-bar"><div class="progress-fill"></div></div><div class="loading-text">✨ 正在计算您的命宫...</div></div></div><div class="container"><div class="header"><h1>满金包</h1><p>奇门遁甲 · 生辰八字登记</p></div><div class="customer-info"><p><strong>👤 姓名:</strong> ' + name + '</p><p><strong>🎁 数量:</strong> ' + qtyNum + ' 个钱包</p></div><div class="security-warning"><p><strong>隐私保护：</strong></p><p>• 你提供的资料（姓名、出生日期、出生时间、出生地点等）将被严格保密，不会对外公开或与第三方共享。</p><p>• 资料仅用于个人八字分析与能量评估，不作其他商业用途。</p><p>• 我们会安全保存资料，并于分析完成后加密或删除。</p><p>• 提交资料即表示你自愿提供并同意以上条款，分析结果仅供参考。</p></div><div class="form-section"><form id="birthdayForm">' + formGroups + '<button type="submit" class="submit-btn" id="submitBtn">马上提交计算命宫</button></form></div></div><script>const rowId="' + row + '";const qty=' + qtyNum + ';const token="' + token + '";const sheetName="' + sheetName + '";function timeToHour(t){if(!t)return 6;const h=parseInt(t.split(":")[0]);if(h>=23||h<1)return 0;if(h>=1&&h<3)return 1;if(h>=3&&h<5)return 2;if(h>=5&&h<7)return 3;if(h>=7&&h<9)return 4;if(h>=9&&h<11)return 5;if(h>=11&&h<13)return 6;if(h>=13&&h<15)return 7;if(h>=15&&h<17)return 8;if(h>=17&&h<19)return 9;if(h>=19&&h<21)return 10;if(h>=21&&h<23)return 11;return 6}const hourNames=["子时","丑时","寅时","卯时","辰时","巳时","午时","未时","申时","酉时","戌时","亥时"];function updateRecipientOptions(){const selectedValues=new Set();for(let i=1;i<=qty;i++){const select=document.getElementById("recipient"+i);if(select.value){selectedValues.add(select.value)}}for(let i=1;i<=qty;i++){const select=document.getElementById("recipient"+i);const options=select.querySelectorAll("option");options.forEach(option=>{if(option.value&&option.value!==""){if(selectedValues.has(option.value)&&option.value!==select.value){option.style.display="none"}else{option.style.display=""}}})}}for(let i=1;i<=qty;i++){document.getElementById("recipient"+i).addEventListener("change",updateRecipientOptions)}function formatDateFromString(dateStr){const parts=dateStr.split("-");if(parts.length===3){return parts[0]+"年"+parts[1]+"月"+parts[2]+"日"}return dateStr}function displayResults(cards){let cardsHtml="";for(let i=0;i<cards.length;i++){const card=cards[i];const birthdateFormatted=formatDateFromString(card.birthday);const birthtimeDisplay=card.birthtime!=="未提供"?card.birthtime:"未提供";cardsHtml+=\'<div class="card-item">\'+\'<div class="card-header">\'+\'<span class="card-number">🎴 #【奇门遁甲 招财阵】\'+card.walletNum+\'</span>\'+\'<span class="recipient-badge">\'+card.recipient+\'</span>\'+\'</div>\'+\'<div class="birthday-info">\'+\'<p>📅 \'+birthdateFormatted+\'</p>\'+\'<p>🕐 \'+birthtimeDisplay+\' (\'+card.hourName+\')</p>\'+\'</div>\'+\'<div class="golden-card">\'+\'<h2>\'+card.goldenCard+\'</h2>\'+\'</div>\'+\'</div>\'}const resultsHtml=\'<div class="results-content">\'+cardsHtml+\'</div>\'+\'<div class="footer">\'+\'<p><strong>恭喜你！已获得专属【奇门遁甲 招财阵】！</strong></p>\'+\'<p><strong>这个赠品将会和钱包一起寄出。如果你有任何疑问，请联系我们的客服。</strong></p>\'+\'<div class="footer-phones">\'+\'<span class="phone-item">📞 +6013-928 4699</span>\'+\'<span class="phone-item">📞 +6013-530 8863</span>\'+\'</div>\'+\'</div>\';const additionalStyles=\'<style>.results-content{padding:30px}.card-item{background:white;border:2px solid #946c36;border-radius:12px;padding:20px;margin-bottom:20px}.card-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:15px;border-bottom:2px solid #946c36;padding-bottom:10px}.card-number{font-weight:bold;color:#333;font-size:16px}.recipient-badge{background:#542e10;color:white;padding:8px 16px;border-radius:20px;font-weight:bold;font-size:14px}.birthday-info{margin-bottom:15px;color:#333}.birthday-info p{margin:8px 0;font-size:14px}.golden-card{background:#c9a870;padding:25px;border-radius:8px;text-align:center;max-width:100%}.golden-card h2{color:white;font-size:36px;text-shadow:1px 1px 2px rgba(0,0,0,0.3);font-weight:bold;letter-spacing:4px}.footer{background:#542e10;color:white;padding:20px;text-align:center;font-size:13px}.footer p{margin:5px 0}</style>\';document.head.insertAdjacentHTML("beforeend",additionalStyles);document.querySelector(".container").innerHTML=\'<div class="header">\'+\'<h1>满金包 2026</h1>\'+\'<p>奇门遁甲 · 命宫结果</p>\'+\'</div>\'+resultsHtml}document.getElementById("birthdayForm").addEventListener("submit",function(e){e.preventDefault();const submitBtn=document.getElementById("submitBtn");const loadingOverlay=document.getElementById("loadingOverlay");const wallets=[];for(let i=1;i<=qty;i++){const recipient=document.getElementById("recipient"+i).value;const birthday=document.getElementById("birthday"+i).value;const birthtime=document.getElementById("birthtime"+i).value;if(!recipient){alert("请选择钱包 #"+i+" 是给谁的");return}if(!birthday){alert("请填写钱包 #"+i+" 的出生日期");return}const dateObj=new Date(birthday+"T00:00:00");const year=dateObj.getFullYear();const month=dateObj.getMonth()+1;const day=dateObj.getDate();const hasTime=birthtime?true:false;const hourIndex=timeToHour(birthtime);wallets.push({walletNum:i,recipient:recipient,year:year,month:month,day:day,hour:hourIndex,hourName:hasTime?hourNames[hourIndex]:"未提供",birthday:birthday,birthtime:birthtime||"未提供",hasTime:hasTime})}submitBtn.disabled=true;loadingOverlay.style.display="flex";const data={wallets:wallets,rowId:rowId,qty:qty,token:token,sheetName:sheetName};google.script.run.withSuccessHandler(function(result){setTimeout(function(){if(result.success){loadingOverlay.style.display="none";displayResults(result.cards)}else{loadingOverlay.style.display="none";submitBtn.disabled=false;alert("提交失败："+result.error)}},1500)}).withFailureHandler(function(error){loadingOverlay.style.display="none";submitBtn.disabled=false;alert("提交失败："+error.message)}).processFormSubmission(data)});</script></body></html>')
+  return HtmlService.createHtmlOutput('<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>满金包 - 生辰八字登记</title><style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:"Microsoft YaHei",Arial,sans-serif;background:#cca983;min-height:100vh;padding:20px}.container{max-width:600px;margin:0 auto;background:white;border-radius:20px;box-shadow:0 20px 60px rgba(0,0,0,0.3);overflow:hidden}.header{background:linear-gradient(135deg,#8a4f19 0%,#a0681f 100%);color:white;padding:40px 30px;text-align:center}.header h1{font-size:48px;margin:0;font-weight:bold;letter-spacing:8px}.header p{margin:12px 0 0 0;font-size:18px;letter-spacing:3px}.customer-info{background:#b88f51;border-left:4px solid #946c36;padding:15px;margin:15px;border-radius:6px}.customer-info p{margin:8px 0;font-size:14px;color:white;font-weight:500}.security-warning{background:#fff9e6;border-left:4px solid #946c36;padding:12px 15px;margin:15px;border-radius:6px;font-size:13px}.security-warning p{margin:6px 0;color:#333}.form-section{padding:30px}.wallet-group{background:white;padding:25px;border-radius:10px;margin-bottom:20px;border:2px solid #b88f51}.wallet-header{border-bottom:3px solid #b88f51;padding-bottom:12px;margin-bottom:18px}.wallet-header h3{color:#542e10;font-size:16px;font-weight:bold}.form-group{margin-bottom:20px}label{display:block;font-weight:600;margin-bottom:8px;color:#542e10;font-size:15px}input,select{width:100%;padding:12px;border:2px solid #ddd;border-radius:8px;font-size:15px;background:white}input:focus,select:focus{outline:none;border-color:#b88f51;box-shadow:0 0 6px rgba(184,143,81,0.6)}.submit-btn{width:100%;padding:18px;background:#E63946;color:white;border:none;border-radius:10px;font-size:24px;font-weight:bold;cursor:pointer;margin-top:15px;transition:background 0.3s}.submit-btn:hover{background:#D62828;transform:translateY(-2px);box-shadow:0 6px 16px rgba(230,57,70,0.3)}.submit-btn:disabled{background:#ccc;cursor:not-allowed;transform:none}.loading-overlay{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.8);z-index:9999;justify-content:center;align-items:center}.loading-container{display:flex;flex-direction:column;align-items:center;justify-content:center}.spinner{width:60px;height:60px;border:4px solid rgba(255,255,255,0.3);border-top:4px solid white;border-radius:50%;animation:spin 1s linear infinite}.progress-bar{width:350px;height:10px;background:rgba(255,255,255,0.3);border-radius:10px;overflow:hidden;margin:25px auto}.progress-fill{height:100%;background:linear-gradient(90deg,#b88f51,#946c36,#542e10);border-radius:10px;animation:progress 1.5s ease-out forwards}.loading-text{color:white;font-size:18px;margin-top:25px;font-weight:bold}@keyframes spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}@keyframes progress{0%{width:0%}100%{width:100%}}</style></head><body><div class="loading-overlay" id="loadingOverlay"><div class="loading-container"><div class="spinner"></div><div class="progress-bar"><div class="progress-fill"></div></div><div class="loading-text">✨ 正在计算您的命宫...</div></div></div><div class="container"><div class="header"><h1>满金包</h1><p>奇门遁甲 · 生辰八字登记</p></div><div class="customer-info"><p><strong>👤 姓名:</strong> ' + name + '</p><p><strong>🎁 数量:</strong> ' + qtyNum + ' 个钱包</p></div><div class="security-warning"><p><strong>隐私保护：</strong></p><p>• 你提供的资料（姓名、出生日期、出生时间、出生地点等）将被严格保密，不会对外公开或与第三方共享。</p><p>• 资料仅用于个人八字分析与能量评估，不作其他商业用途。</p><p>• 我们会安全保存资料，并于分析完成后加密或删除。</p><p>• 提交资料即表示你自愿提供并同意以上条款，分析结果仅供参考。</p></div><div class="form-section"><form id="birthdayForm">' + formGroups + '<button type="submit" class="submit-btn" id="submitBtn">马上提交计算命宫</button></form></div></div><script>const rowId="' + row + '";const qty=' + qtyNum + ';const token="' + token + '";const sheetName="' + sheetName + '";function timeToHour(t){if(!t)return 6;const h=parseInt(t.split(":")[0]);if(h>=23||h<1)return 0;if(h>=1&&h<3)return 1;if(h>=3&&h<5)return 2;if(h>=5&&h<7)return 3;if(h>=7&&h<9)return 4;if(h>=9&&h<11)return 5;if(h>=11&&h<13)return 6;if(h>=13&&h<15)return 7;if(h>=15&&h<17)return 8;if(h>=17&&h<19)return 9;if(h>=19&&h<21)return 10;if(h>=21&&h<23)return 11;return 6}const hourNames=["子时","丑时","寅时","卯时","辰时","巳时","午时","未时","申时","酉时","戌时","亥时"];function formatDateFromString(dateStr){const parts=dateStr.split("-");if(parts.length===3){return parts[0]+"年"+parts[1]+"月"+parts[2]+"日"}return dateStr}function displayResults(cards){let cardsHtml="";for(let i=0;i<cards.length;i++){const card=cards[i];const birthdateFormatted=formatDateFromString(card.birthday);const birthtimeDisplay=card.birthtime!=="未提供"?card.birthtime:"未提供";cardsHtml+=\'<div class="card-item">\'+\'<div class="card-header">\'+\'<span class="card-number">🎴 #【奇门遁甲 招财阵】\'+card.walletNum+\'</span>\'+\'<span class="recipient-badge">\'+card.recipient+\'</span>\'+\'</div>\'+\'<div class="birthday-info">\'+\'<p>📅 \'+birthdateFormatted+\'</p>\'+\'<p>🕐 \'+birthtimeDisplay+\' (\'+card.hourName+\')</p>\'+\'</div>\'+\'<div class="golden-card">\'+\'<h2>\'+card.goldenCard+\'</h2>\'+\'</div>\'+\'</div>\'}const resultsHtml=\'<div class="results-content">\'+cardsHtml+\'</div>\'+\'<div class="footer">\'+\'<p><strong>恭喜你！已获得专属【奇门遁甲 招财阵】！</strong></p>\'+\'<p><strong>这个赠品将会和钱包一起寄出。如果你有任何疑问，请联系我们的客服。</strong></p>\'+\'<div class="footer-phones">\'+\'<span class="phone-item">📞 +6013-928 4699</span>\'+\'<span class="phone-item">📞 +6013-530 8863</span>\'+\'</div>\'+\'</div>\';const additionalStyles=\'<style>.results-content{padding:30px}.card-item{background:white;border:2px solid #946c36;border-radius:12px;padding:20px;margin-bottom:20px}.card-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:15px;border-bottom:2px solid #946c36;padding-bottom:10px}.card-number{font-weight:bold;color:#333;font-size:16px}.recipient-badge{background:#542e10;color:white;padding:8px 16px;border-radius:20px;font-weight:bold;font-size:14px}.birthday-info{margin-bottom:15px;color:#333}.birthday-info p{margin:8px 0;font-size:14px}.golden-card{background:#c9a870;padding:25px;border-radius:8px;text-align:center;max-width:100%}.golden-card h2{color:white;font-size:36px;text-shadow:1px 1px 2px rgba(0,0,0,0.3);font-weight:bold;letter-spacing:4px}.footer{background:#542e10;color:white;padding:20px;text-align:center;font-size:13px}.footer p{margin:5px 0}</style>\';document.head.insertAdjacentHTML("beforeend",additionalStyles);document.querySelector(".container").innerHTML=\'<div class="header">\'+\'<h1>满金包 2026</h1>\'+\'<p>奇门遁甲 · 命宫结果</p>\'+\'</div>\'+resultsHtml}document.getElementById("birthdayForm").addEventListener("submit",function(e){e.preventDefault();const submitBtn=document.getElementById("submitBtn");const loadingOverlay=document.getElementById("loadingOverlay");const wallets=[];for(let i=1;i<=qty;i++){const recipient=document.getElementById("recipient"+i).value;const birthday=document.getElementById("birthday"+i).value;const birthtime=document.getElementById("birthtime"+i).value;if(!recipient){alert("请选择钱包 #"+i+" 是给谁的");return}if(!birthday){alert("请填写钱包 #"+i+" 的出生日期");return}const dateObj=new Date(birthday+"T00:00:00");const year=dateObj.getFullYear();const month=dateObj.getMonth()+1;const day=dateObj.getDate();const hasTime=birthtime?true:false;const hourIndex=timeToHour(birthtime);wallets.push({walletNum:i,recipient:recipient,year:year,month:month,day:day,hour:hourIndex,hourName:hasTime?hourNames[hourIndex]:"未提供",birthday:birthday,birthtime:birthtime||"未提供",hasTime:hasTime})}submitBtn.disabled=true;loadingOverlay.style.display="flex";const data={wallets:wallets,rowId:rowId,qty:qty,token:token,sheetName:sheetName};google.script.run.withSuccessHandler(function(result){setTimeout(function(){if(result.success){loadingOverlay.style.display="none";displayResults(result.cards)}else{loadingOverlay.style.display="none";submitBtn.disabled=false;alert("提交失败："+result.error)}},1500)}).withFailureHandler(function(error){loadingOverlay.style.display="none";submitBtn.disabled=false;alert("提交失败："+error.message)}).processFormSubmission(data)});</script></body></html>')
     .setTitle('满金包2026 - 生辰八字登记')
     .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
 }
