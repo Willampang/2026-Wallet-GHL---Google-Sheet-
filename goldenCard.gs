@@ -1,8 +1,8 @@
-//GoldenCard.gs
+//GoldenCard.gs - UPDATED VERSION
 const BDAY_SETTINGS = {
   GMAIL_ADDRESS: 'customercare@mandarin.club',
-  FORM_BASE_URL: 'https://script.google.com/macros/s/AKfycbweUYs_h2pz0SYsj8wXCIsne0R_Zh0J-GHF37BmbG0qykV-cLPVpJQQlqPS7KuIXw3zxg/exec',
-  SHEET_NAMES: ['Orders', 'Orders_2', 'Orders_3'],  // Changed to array
+  FORM_BASE_URL: 'https://script.google.com/macros/s/AKfycbymte7qeSvW-EFsOtTIsesYODTgHw-tu2utY_J8sZCJdhKC9jH-Yqe0DMKL_lSWTgfp/exec',
+  SHEET_NAMES: ['Orders', 'Orders_2', 'Orders_3'],
   BATCH_LIMIT: 5,
   SKIP_SINGLE_WALLET: true,
   COLUMNS: {
@@ -76,13 +76,35 @@ function smartSplitQty(orderSummary) {
   
   for (let i = 0; i < parts.length; i++) {
     const part = parts[i].trim();
-    const matches = part.match(/[xX×]\s*(\d+)\s*$/);
     
-    if (matches && matches[1]) {
-      const qty = parseInt(matches[1]);
-      totalQty += qty;
-      Logger.log('   📦 Found: ' + part + ' -> Qty: ' + qty);
+    // Check for bundle products
+    let walletCount = 0;
+    
+    // F款: 带财款x1+吸金款x1 = 2 wallets (D + E)
+    if (part.includes('F款') && part.includes('带财款') && part.includes('吸金款')) {
+      walletCount = 2;
+      Logger.log('   🎁 Bundle F款 detected: 2 wallets (D + E)');
     }
+    // G款: 带财款x2 = 2 wallets (D x2)
+    else if (part.includes('G款') && part.includes('带财款x2')) {
+      walletCount = 2;
+      Logger.log('   🎁 Bundle G款 detected: 2 wallets (D x2)');
+    }
+    // H款: 吸金款x2 = 2 wallets (E x2)
+    else if (part.includes('H款') && part.includes('吸金款x2')) {
+      walletCount = 2;
+      Logger.log('   🎁 Bundle H款 detected: 2 wallets (E x2)');
+    }
+    // Regular products: extract quantity from "x数字"
+    else {
+      const matches = part.match(/[xX×]\s*(\d+)\s*$/);
+      if (matches && matches[1]) {
+        walletCount = parseInt(matches[1]);
+      }
+    }
+    
+    totalQty += walletCount;
+    Logger.log('   📦 Found: ' + part + ' -> Qty: ' + walletCount);
   }
   
   Logger.log('📊 Total wallets detected: ' + totalQty);
@@ -93,7 +115,6 @@ function processNextBdayOrder() {
   try {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     
-    // Loop through all sheets
     for (let s = 0; s < BDAY_SETTINGS.SHEET_NAMES.length; s++) {
       const sheetName = BDAY_SETTINGS.SHEET_NAMES[s];
       const sh = ss.getSheetByName(sheetName);
@@ -129,7 +150,7 @@ function processNextBdayOrder() {
             }
             
             const token = generateAccessToken(i, shopifyOrderId, sheetName);
-            const formUrl = generateFormUrl(name, qty, i, shopifyOrderId, token, sheetName);
+            const formUrl = generateFormUrl(name, i, shopifyOrderId, token, sheetName);
             
             if (sendBdayEmail(name, email, qty, i, shopifyOrderId, formUrl)) {
               sh.getRange(i, BDAY_SETTINGS.COLUMNS.GOLDEN_CARD_STATUS).setValue('Pending');
@@ -154,10 +175,9 @@ function processNextBdayOrder() {
   }
 }
 
-function generateFormUrl(name, qty, rowId, orderId, token, sheetName) {
+function generateFormUrl(name, rowId, orderId, token, sheetName) {
   return BDAY_SETTINGS.FORM_BASE_URL + 
     '?name=' + encodeURIComponent(name) + 
-    '&qty=' + qty + 
     '&row=' + rowId + 
     '&order=' + encodeURIComponent(orderId) +
     '&token=' + encodeURIComponent(token) +
@@ -176,7 +196,6 @@ function processAllBdayOrders() {
     
     Logger.log('📊 Batch limit set to: ' + batchLimit + ' emails');
     
-    // Loop through all sheets
     for (let s = 0; s < BDAY_SETTINGS.SHEET_NAMES.length; s++) {
       const sheetName = BDAY_SETTINGS.SHEET_NAMES[s];
       const sh = ss.getSheetByName(sheetName);
@@ -225,7 +244,7 @@ function processAllBdayOrders() {
             
             try {
               const token = generateAccessToken(i, shopifyOrderId, sheetName);
-              const formUrl = generateFormUrl(name, qty, i, shopifyOrderId, token, sheetName);
+              const formUrl = generateFormUrl(name, i, shopifyOrderId, token, sheetName);
               
               if (sendBdayEmail(name, email, qty, i, shopifyOrderId, formUrl)) {
                 sh.getRange(i, BDAY_SETTINGS.COLUMNS.GOLDEN_CARD_STATUS).setValue('Pending');
@@ -251,7 +270,6 @@ function processAllBdayOrders() {
         }
       }
       
-      // If batch limit reached, stop processing remaining sheets
       if (totalProcessed >= batchLimit) {
         break;
       }
@@ -350,7 +368,7 @@ function sendBdayEmail(name, email, qty, rowId, orderId, formUrl) {
       '此链接有效期为24小时，请尽快完成填写。\n\n' +
       '客服联系方式：\n' +
       '📞 +6013-928 4699 / +6013-530 8863\n' +
-      '�� customercare@mandarin.club\n\n' +
+      '📧 customercare@mandarin.club\n\n' +
       '此邮件由 Mandarin Club 官方系统自动发送，请勿直接回复。\n' +
       '---\n' +
       'Mandarin Club\n' +
