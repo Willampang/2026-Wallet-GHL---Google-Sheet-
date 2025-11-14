@@ -1,7 +1,7 @@
 //GoldenCard.gs - UPDATED VERSION
 const BDAY_SETTINGS = {
   GMAIL_ADDRESS: 'customercare@mandarin.club',
-  FORM_BASE_URL: 'https://script.google.com/macros/s/AKfycbymte7qeSvW-EFsOtTIsesYODTgHw-tu2utY_J8sZCJdhKC9jH-Yqe0DMKL_lSWTgfp/exec',
+  FORM_BASE_URL: 'https://script.google.com/macros/s/AKfycbzQhM16FkVy5vEBDb3E3scsqxDNC4obRwyjgwCtSbl6LN71Xb4WR0xqqnbVXN-ZFtIwcQ/exec',
   SHEET_NAMES: ['Orders', 'Orders_2', 'Orders_3'],
   BATCH_LIMIT: 5,
   SKIP_SINGLE_WALLET: true,
