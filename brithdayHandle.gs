@@ -1,10 +1,13 @@
-//birthdayHandle.gs - CLEAN VERSION (Recipients can be selected multiple times)
-const TIANGAN = ['甲', '乙', '丙', '丁', '戊', '己', '庚', '辛', '壬', '癸'];
-const DIZHI = ['子', '丑', '寅', '卯', '辰', '巳', '午', '未', '申', '酉', '戌', '亥'];
-const BAGONG = ['离', '坤', '兑', '乾', '坎', '艮', '震', '巽'];
+//birthdayHandle.gs - EXTERNAL BOS API VERSION
+// This version calls Render server which then calls BOS API
 
 // ============================================================
-// SHOPIFY CONFIGURATION FOR BIRTHDAY HANDLER
+// EXTERNAL API CONFIGURATION
+// ============================================================
+const EXTERNAL_BOS_API_URL = 'https://bos-middleware.onrender.com/api/calculate_golden_card';
+
+// ============================================================
+// SHOPIFY CONFIGURATION
 // ============================================================
 const BDAY_SHOPIFY_CONFIG = {
   SHOP_URL: 'fsr2021.myshopify.com',
@@ -66,9 +69,8 @@ function doGet(e) {
     return createResultsPage(name, goldenCardData, rowId, sh, sheetName);
   }
   
-  // Calculate actual wallet quantity from Order Summary
   const actualQty = smartSplitQty(orderSummary);
-  Logger.log('📊 Actual wallet quantity from Order Summary: ' + actualQty);
+  Logger.log('📊 Actual wallet quantity: ' + actualQty);
   
   return createBirthdayForm(name, actualQty, row, orderId, token, sheetName);
 }
@@ -105,36 +107,22 @@ function smartSplit(str) {
 }
 
 function smartSplitQty(orderSummary) {
-  if (!orderSummary || orderSummary === '') {
-    return 0;
-  }
+  if (!orderSummary || orderSummary === '') return 0;
   
   let totalQty = 0;
   const parts = smartSplit(orderSummary);
   
   for (let i = 0; i < parts.length; i++) {
     const part = parts[i].trim();
-    
-    // Check for bundle products
     let walletCount = 0;
     
-    // F款: 带财款x1+吸金款x1 = 2 wallets (D + E)
     if (part.includes('F款') && part.includes('带财款') && part.includes('吸金款')) {
       walletCount = 2;
-      Logger.log('   🎁 Bundle F款 detected: 2 wallets (D + E)');
-    }
-    // G款: 带财款x2 = 2 wallets (D x2)
-    else if (part.includes('G款') && part.includes('带财款x2')) {
+    } else if (part.includes('G款') && part.includes('带财款x2')) {
       walletCount = 2;
-      Logger.log('   🎁 Bundle G款 detected: 2 wallets (D x2)');
-    }
-    // H款: 吸金款x2 = 2 wallets (E x2)
-    else if (part.includes('H款') && part.includes('吸金款x2')) {
+    } else if (part.includes('H款') && part.includes('吸金款x2')) {
       walletCount = 2;
-      Logger.log('   🎁 Bundle H款 detected: 2 wallets (E x2)');
-    }
-    // Regular products: extract quantity from "x数字"
-    else {
+    } else {
       const matches = part.match(/[xX×]\s*(\d+)\s*$/);
       if (matches && matches[1]) {
         walletCount = parseInt(matches[1]);
@@ -142,12 +130,101 @@ function smartSplitQty(orderSummary) {
     }
     
     totalQty += walletCount;
-    Logger.log('   📦 Found: ' + part + ' -> Qty: ' + walletCount);
   }
   
-  Logger.log('📊 Total wallets detected: ' + totalQty);
   return totalQty;
 }
+
+// ============================================================
+// EXTERNAL BOS API CALL
+// ============================================================
+
+function formatDateTimeForBOS(year, month, day, hourIndex, minute) {
+  // 地支索引 → 该时辰的起始小时
+  const hourStart = {
+    0: 23,  // 子时 23:00-01:00
+    1: 1,   // 丑时 01:00-03:00
+    2: 3,   // 寅时 03:00-05:00
+    3: 5,   // 卯时 05:00-07:00
+    4: 7,   // 辰时 07:00-09:00
+    5: 9,   // 巳时 09:00-11:00
+    6: 11,  // 午时 11:00-13:00
+    7: 13,  // 未时 13:00-15:00
+    8: 15,  // 申时 15:00-17:00
+    9: 17,  // 酉时 17:00-19:00
+    10: 19, // 戌时 19:00-21:00
+    11: 21  // 亥时 21:00-23:00
+  };
+  
+  const hour24 = hourStart[hourIndex] || 12;
+  
+  let hour12 = hour24;
+  let ampm = 'AM';
+  
+  if (hour24 >= 12) {
+    ampm = 'PM';
+    if (hour24 > 12) {
+      hour12 = hour24 - 12;
+    }
+  }
+  
+  if (hour24 === 0 || hour24 === 23) {
+    hour12 = 11;
+    ampm = 'PM';
+  }
+  
+  const dateStr = year + '-' + 
+    String(month).padStart(2, '0') + '-' + 
+    String(day).padStart(2, '0');
+  
+  const timeStr = String(hour12).padStart(2, '0') + ':' + 
+    String(minute || 0).padStart(2, '0') + ampm;
+  
+  return dateStr + ' ' + timeStr;
+}
+
+function callExternalBOSAPI(walletData) {
+  try {
+    Logger.log('🌐 Calling external BOS API...');
+    Logger.log('   URL: ' + EXTERNAL_BOS_API_URL);
+    
+    const options = {
+      'method': 'post',
+      'contentType': 'application/json',
+      'payload': JSON.stringify(walletData),
+      'muteHttpExceptions': true
+    };
+    
+    const response = UrlFetchApp.fetch(EXTERNAL_BOS_API_URL, options);
+    const responseCode = response.getResponseCode();
+    const responseText = response.getContentText();
+    
+    Logger.log('📥 External API Response:');
+    Logger.log('   Status: ' + responseCode);
+    Logger.log('   Body: ' + responseText);
+    
+    if (responseCode !== 200) {
+      return {
+        success: false,
+        error: 'External API returned status ' + responseCode
+      };
+    }
+    
+    const data = JSON.parse(responseText);
+    return data;
+    
+  } catch (error) {
+    Logger.log('❌ External API Error: ' + error);
+    return {
+      success: false,
+      error: error.toString()
+    };
+  }
+}
+
+// ============================================================
+// FORM SUBMISSION HANDLER
+// ============================================================
 
 function processFormSubmission(data) {
   try {
@@ -166,67 +243,124 @@ function processFormSubmission(data) {
     const shopifyOrderId = sh.getRange(rowId, 16).getValue();
     
     if (!storedLink) {
-      return { success: false, error: '访问令牌无效，请重新获取链接' };
+      return { success: false, error: '访问令牌无效' };
     }
     
     const urlMatch = storedLink.match(/token=([^&]+)/);
     const storedToken = urlMatch ? decodeURIComponent(urlMatch[1]) : null;
     
     if (!storedToken || storedToken !== submittedToken) {
-      return { success: false, error: '访问令牌无效，请重新获取链接' };
+      return { success: false, error: '访问令牌无效' };
     }
     
     if (goldenCardStatus === 'Complete') {
       return { success: false, error: '您已经提交过生日资料了' };
     }
     
+    // Prepare data for external BOS API
+    const walletsData = [];
+    
+    for (let i = 0; i < data.wallets.length; i++) {
+      const wallet = data.wallets[i];
+      
+      Logger.log('\n🎴 Preparing wallet #' + wallet.walletNum);
+      
+      const hour = wallet.hour || 12;
+      const minute = 0;
+      const datetime = formatDateTimeForBOS(
+        wallet.year, 
+        wallet.month, 
+        wallet.day, 
+        hour, 
+        minute
+      );
+      
+      const gender = 'male'; // Default gender
+      
+      walletsData.push({
+        walletNum: wallet.walletNum,
+        recipient: wallet.recipient,
+        name_cn: wallet.recipient,
+        datetime: datetime,
+        gender: gender,
+        birthday: wallet.birthday,
+        birthtime: wallet.birthtime,
+        hourName: wallet.hourName
+      });
+    }
+    
+    // Call external API
+    Logger.log('🚀 Sending to external BOS API...');
+    const apiResponse = callExternalBOSAPI({
+      wallets: walletsData,
+      shopify_order_id: shopifyOrderId
+    });
+    
+    if (!apiResponse.success) {
+      Logger.log('❌ External API failed: ' + apiResponse.error);
+      return { 
+        success: false, 
+        error: 'BOS API调用失败: ' + apiResponse.error 
+      };
+    }
+    
+    // Process results
     const cards = [];
     const allCards = [];
     const detailedInfo = [];
     
-    for (let i = 0; i < data.wallets.length; i++) {
-      const wallet = data.wallets[i];
-      const card = calculateCard(wallet.year, wallet.month, wallet.day, wallet.hour);
+    const results = apiResponse.results || [];
+    
+    for (let i = 0; i < results.length; i++) {
+      const result = results[i];
+      const walletNum = result.walletNum || (i + 1);
+      const goldenCard = result.goldenCard || '离';
+      
+      Logger.log('   Wallet #' + walletNum + ' → ' + goldenCard);
+      
+      const originalWallet = walletsData[i];
       
       cards.push({
-        walletNum: wallet.walletNum,
-        recipient: wallet.recipient,
-        goldenCard: card,
-        hourName: wallet.hourName,
-        birthday: wallet.birthday,
-        birthtime: wallet.birthtime
+        walletNum: walletNum,
+        recipient: originalWallet.recipient,
+        goldenCard: goldenCard,
+        hourName: originalWallet.hourName,
+        birthday: originalWallet.birthday,
+        birthtime: originalWallet.birthtime
       });
       
-      allCards.push(card);
+      allCards.push(goldenCard);
       
       detailedInfo.push({
-        wallet: wallet.walletNum,
-        recipient: wallet.recipient,
-        birthday: wallet.birthday,
-        birthtime: wallet.birthtime,
-        hourName: wallet.hourName,
-        card: card
+        wallet: walletNum,
+        recipient: originalWallet.recipient,
+        birthday: originalWallet.birthday,
+        birthtime: originalWallet.birthtime,
+        hourName: originalWallet.hourName,
+        card: goldenCard
       });
     }
     
     const formattedCards = formatCardsWithSeparator(allCards);
     
+    // Cache detailed info
     const cache = CacheService.getScriptCache();
     const cacheKey = 'details_' + sheetName + '_' + rowId;
     cache.put(cacheKey, JSON.stringify(detailedInfo), 86400);
     
+    // Update Google Sheets
     sh.getRange(rowId, 17).setValue('Complete');
     sh.getRange(rowId, 18).setValue(formattedCards);
     
     // Add Golden Card to Shopify
-    Logger.log('🛒 Adding Golden Card products to Shopify order: ' + shopifyOrderId);
+    Logger.log('🛒 Adding Golden Card products to Shopify...');
     const addProductResult = addGoldenCardToShopifyOrder(shopifyOrderId, allCards);
     
     if (!addProductResult.success) {
-      Logger.log('⚠️ Failed to add products to Shopify: ' + addProductResult.error);
-      sh.getRange(rowId, 15).setValue('Golden Card calculated but Shopify failed: ' + addProductResult.error);
+      Logger.log('⚠️ Shopify update failed: ' + addProductResult.error);
+      sh.getRange(rowId, 15).setValue('Golden Card calculated but Shopify failed');
     } else {
-      Logger.log('✅ Successfully added Golden Card products to Shopify order');
+      Logger.log('✅ Successfully added to Shopify');
       sh.getRange(rowId, 15).setValue('✅ Golden Cards added to Shopify Order');
     }
     
@@ -248,7 +382,6 @@ function processFormSubmission(data) {
 
 function addGoldenCardToShopifyOrder(orderIdentifier, goldenCards) {
   try {
-    // Convert to GraphQL ID
     const conversionResult = convertOrderNameToNumericId(orderIdentifier);
     if (!conversionResult.success) {
       return { success: false, error: conversionResult.error };
@@ -256,14 +389,12 @@ function addGoldenCardToShopifyOrder(orderIdentifier, goldenCards) {
     
     const graphqlOrderId = conversionResult.graphqlId;
     
-    // Count quantities
     const cardQuantities = {};
     for (let i = 0; i < goldenCards.length; i++) {
       const card = goldenCards[i];
       cardQuantities[card] = (cardQuantities[card] || 0) + 1;
     }
     
-    // Prepare line items
     const lineItemsInput = [];
     for (const card in cardQuantities) {
       const variantId = GOLDEN_CARD_VARIANTS[card];
@@ -279,17 +410,13 @@ function addGoldenCardToShopifyOrder(orderIdentifier, goldenCards) {
       return { success: false, error: 'No valid products to add' };
     }
     
-    // Begin order edit
     const beginMutation = 'mutation orderEditBegin($id: ID!) { orderEditBegin(id: $id) { calculatedOrder { id } userErrors { field message } } }';
     const beginResult = executeGraphQLMutation(beginMutation, { id: graphqlOrderId });
     
-    if (!beginResult.success) {
-      return beginResult;
-    }
+    if (!beginResult.success) return beginResult;
     
     const calculatedOrderId = beginResult.data.orderEditBegin.calculatedOrder.id;
     
-    // Add variants
     const addMutation = 'mutation orderEditAddVariant($id: ID!, $variantId: ID!, $quantity: Int!) { orderEditAddVariant(id: $id, variantId: $variantId, quantity: $quantity) { calculatedLineItem { id } userErrors { field message } } }';
     
     for (let i = 0; i < lineItemsInput.length; i++) {
@@ -300,13 +427,10 @@ function addGoldenCardToShopifyOrder(orderIdentifier, goldenCards) {
       });
     }
     
-    // Commit edit
     const commitMutation = 'mutation orderEditCommit($id: ID!) { orderEditCommit(id: $id, notifyCustomer: false, staffNote: "Added Golden Cards") { order { id } userErrors { field message } } }';
     const commitResult = executeGraphQLMutation(commitMutation, { id: calculatedOrderId });
     
-    if (!commitResult.success) {
-      return commitResult;
-    }
+    if (!commitResult.success) return commitResult;
     
     return { success: true, addedItems: lineItemsInput.length };
     
@@ -384,115 +508,6 @@ function executeGraphQLMutation(mutation, variables) {
   } catch (error) {
     return { success: false, error: error.toString() };
   }
-}
-
-// ============================================================
-// GOLDEN CARD CALCULATION
-// ============================================================
-
-function calculateCard(year, month, day, hourIndex) {
-  const dayPillar = getDayPillarFixed(year, month, day, hourIndex);
-  const isDayGanYin = isYinGan(dayPillar.gan);
-  const solarTerm = getSolarTerm(year, month, day);
-  const juShu = getJuShuFromSolarTerm(solarTerm.name, solarTerm.isYangDun);
-  
-  let palace = flyFromLiGong(juShu, solarTerm.isYangDun);
-  
-  if (isDayGanYin) {
-    palace = reverseFly(palace);
-  }
-  
-  const hourBranches = ['子','丑','寅','卯','辰','巳','午','未','申','酉','戌','亥'];
-  const hourBranch = hourBranches[hourIndex % 12];
-  
-  if (solarTerm.isYangDun && ['午','未','申'].includes(hourBranch)) {
-    palace = BAGONG[(BAGONG.indexOf(palace) + 1) % 8];
-  } else if (!solarTerm.isYangDun && ['子','丑','寅'].includes(hourBranch)) {
-    palace = BAGONG[(BAGONG.indexOf(palace) + 1) % 8];
-  }
-  
-  palace = applyGVCorrection(palace);
-  
-  return palace;
-}
-
-function getDayPillarFixed(year, month, day, hourIndex) {
-  const baseJD = getJulianDay(2000, 1, 1);
-  let targetJD = getJulianDay(year, month, day);
-  if (hourIndex === 0) targetJD -= 1;
-  const daysDiff = targetJD - baseJD;
-  const ganIndex = ((daysDiff % 10) + 10) % 10;
-  const zhiIndex = ((daysDiff % 12) + 4 + 12) % 12;
-  return { gan: TIANGAN[ganIndex], zhi: DIZHI[zhiIndex] };
-}
-
-function getJulianDay(year, month, day) {
-  if (month <= 2) {
-    year = year - 1;
-    month = month + 12;
-  }
-  const A = Math.floor(year / 100);
-  const B = 2 - A + Math.floor(A / 4);
-  return Math.floor(365.25 * (year + 4716)) + Math.floor(30.6001 * (month + 1)) + day + B - 1524.5;
-}
-
-function isYinGan(gan) {
-  return ['乙', '丁', '己', '辛', '癸'].indexOf(gan) !== -1;
-}
-
-function getSolarTerm(year, month, day) {
-  const termDates = [
-    {month: 1, day: 5, name: '小寒', isYangDun: true}, {month: 1, day: 20, name: '大寒', isYangDun: true},
-    {month: 2, day: 4, name: '立春', isYangDun: true}, {month: 2, day: 19, name: '雨水', isYangDun: true},
-    {month: 3, day: 5, name: '惊蛰', isYangDun: true}, {month: 3, day: 20, name: '春分', isYangDun: true},
-    {month: 4, day: 5, name: '清明', isYangDun: true}, {month: 4, day: 20, name: '谷雨', isYangDun: true},
-    {month: 5, day: 5, name: '立夏', isYangDun: true}, {month: 5, day: 21, name: '小满', isYangDun: true},
-    {month: 6, day: 6, name: '芒种', isYangDun: true}, {month: 6, day: 21, name: '夏至', isYangDun: false},
-    {month: 7, day: 7, name: '小暑', isYangDun: false}, {month: 7, day: 23, name: '大暑', isYangDun: false},
-    {month: 8, day: 8, name: '立秋', isYangDun: false}, {month: 8, day: 23, name: '处暑', isYangDun: false},
-    {month: 9, day: 8, name: '白露', isYangDun: false}, {month: 9, day: 23, name: '秋分', isYangDun: false},
-    {month: 10, day: 8, name: '寒露', isYangDun: false}, {month: 10, day: 23, name: '霜降', isYangDun: false},
-    {month: 11, day: 7, name: '立冬', isYangDun: false}, {month: 11, day: 22, name: '小雪', isYangDun: false},
-    {month: 12, day: 7, name: '大雪', isYangDun: false}, {month: 12, day: 22, name: '冬至', isYangDun: true}
-  ];
-  
-  let currentTerm = termDates[0];
-  for (let i = 0; i < termDates.length; i++) {
-    const term = termDates[i];
-    if (month < term.month || (month === term.month && day < term.day)) {
-      currentTerm = i > 0 ? termDates[i - 1] : termDates[termDates.length - 1];
-      break;
-    } else if (i === termDates.length - 1) {
-      currentTerm = term;
-    }
-  }
-  return { name: currentTerm.name, isYangDun: currentTerm.isYangDun };
-}
-
-function getJuShuFromSolarTerm(solarTermName, isYangDun) {
-  const yangDunJuShu = {
-    '冬至': 1, '小寒': 1, '大寒': 2, '立春': 2, '雨水': 3, '惊蛰': 3,
-    '春分': 4, '清明': 4, '谷雨': 5, '立夏': 5, '小满': 6, '芒种': 6
-  };
-  const yinDunJuShu = {
-    '夏至': 9, '小暑': 9, '大暑': 8, '立秋': 8, '处暑': 7, '白露': 7,
-    '秋分': 6, '寒露': 6, '霜降': 5, '立冬': 5, '小雪': 4, '大雪': 4
-  };
-  return isYangDun ? (yangDunJuShu[solarTermName] || 1) : (yinDunJuShu[solarTermName] || 9);
-}
-
-function flyFromLiGong(juShu, isYangDun) {
-  const steps = juShu - 1;
-  return isYangDun ? BAGONG[steps % 8] : BAGONG[(8 - (steps % 8)) % 8];
-}
-
-function reverseFly(palace) {
-  const reverseMap = { '离': '坎', '坎': '离', '震': '兑', '兑': '震', '巽': '乾', '乾': '巽', '艮': '坤', '坤': '艮' };
-  return reverseMap[palace] || palace;
-}
-
-function applyGVCorrection(palace) {
-  return BAGONG[(BAGONG.indexOf(palace) + 1) % 8];
 }
 
 function formatCardsWithSeparator(cards) {
