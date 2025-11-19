@@ -1,7 +1,7 @@
 //GoldenCard.gs - UPDATED VERSION
 const BDAY_SETTINGS = {
   GMAIL_ADDRESS: 'customercare@mandarin.club',
-  FORM_BASE_URL: 'https://script.google.com/macros/s/AKfycbzQhM16FkVy5vEBDb3E3scsqxDNC4obRwyjgwCtSbl6LN71Xb4WR0xqqnbVXN-ZFtIwcQ/exec',
+  FORM_BASE_URL: 'https://script.google.com/macros/s/AKfycbyGABN4ZFSzpkqMfpvMN2h6sXxbOW6cGEX7R6av37FaTEk1LoJnE8w1cur14Bl6N-bRHg/exec',
   SHEET_NAMES: ['Orders', 'Orders_2', 'Orders_3'],
   BATCH_LIMIT: 5,
   SKIP_SINGLE_WALLET: true,
@@ -309,13 +309,13 @@ function sendBdayEmail(name, email, qty, rowId, orderId, formUrl) {
       '<tr><td align="center">' +
       '<table width="600" cellpadding="0" cellspacing="0" style="background-color:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.1)">' +
       
-    '<tr><td style="padding:0;text-align:center;border-radius:0">' +
+      '<tr><td style="padding:0;text-align:center;border-radius:0">' +
       '<div style="background:#8a4f19;background:linear-gradient(135deg,#8a4f19 0%,#a0681f 100%);padding:30px;text-align:center;">' +
-        '<h1 style="margin:0;color:#000000;font-size:28px;font-weight:bold;letter-spacing:0.5px;">满金包 2026</h1>' +
-        '<p style="margin:8px 0 0 0;color:#000000;font-size:14px;font-weight:400;letter-spacing:1px;opacity:0.9;">奇门遁甲 · 招财阵定制</p>' +
+      '<h1 style="margin:0;color:#000000;font-size:28px;font-weight:bold;letter-spacing:0.5px;">满金包 2026</h1>' +
+      '<p style="margin:8px 0 0 0;color:#000000;font-size:14px;font-weight:400;letter-spacing:1px;opacity:0.9;">奇门遁甲 · 招财阵定制</p>' +
       '</div>' +
-    '</td></tr>' +
-
+      '</td></tr>' +
+      
       '<tr><td style="padding:30px">' +
       '<table width="100%" cellpadding="0" cellspacing="0" style="background:#f9f9f9;border-left:4px solid #b88f51;padding:15px;border-radius:4px">' +
       '<tr><td><p style="margin:8px 0;font-size:14px;color:#333"><strong>👤 尊敬的客户：</strong>' + name + '</p>' +
@@ -382,7 +382,7 @@ function sendBdayEmail(name, email, qty, rowId, orderId, formUrl) {
       body: plainText,
       htmlBody: htmlBody,
       name: 'Mandarin Club',
-      replyTo: authorizedEmail,
+      replyTo: 'customercare@mandarin.club',
       charset: 'UTF-8',
       noReply: false
     });
