@@ -1,10 +1,10 @@
-//birthdayHandle.gs - EXTERNAL BOS API VERSION
+//birthdayHandle.gs - EXTERNAL BOS API VERSION WITH SAGE IMPORT
 // This version calls Render server which then calls BOS API
 
 // ============================================================
 // EXTERNAL API CONFIGURATION
 // ============================================================
-const EXTERNAL_BOS_API_URL = 'https://bos-middleware.onrender.com/api/calculate_golden_card';
+const EXTERNAL_BOS_API_URL = 'https://bos-middleware-t2it.onrender.com/api/calculate_golden_card';
 
 // ============================================================
 // SHOPIFY CONFIGURATION
@@ -24,6 +24,18 @@ const GOLDEN_CARD_VARIANTS = {
   '坎': '47294132224152',
   '艮': '47294132191384',
   '兑': '47294131011736'
+};
+
+// ✅ NEW: Golden Card SKU Mapping
+const GOLDEN_CARD_SKU = {
+  '兑': 'MD-WLT-GCD-1001',
+  '艮': 'MD-WLT-GCD-1002',
+  '坎': 'MD-WLT-GCD-1003',
+  '坤': 'MD-WLT-GCD-1004',
+  '离': 'MD-WLT-GCD-1005',
+  '乾': 'MD-WLT-GCD-1006',
+  '巽': 'MD-WLT-GCD-1007',
+  '震': 'MD-WLT-GCD-1008'
 };
 
 // ============================================================
@@ -222,6 +234,30 @@ function callExternalBOSAPI(walletData) {
   }
 }
 
+// ✅ NEW: Format Sage Import String
+function formatSageImport(orderIdentifier, goldenCards) {
+  // Count quantities for each card
+  const cardQuantities = {};
+  for (let i = 0; i < goldenCards.length; i++) {
+    const card = goldenCards[i];
+    cardQuantities[card] = (cardQuantities[card] || 0) + 1;
+  }
+  
+  // Build SKU list
+  const skuList = [];
+  for (const card in cardQuantities) {
+    const sku = GOLDEN_CARD_SKU[card];
+    const qty = cardQuantities[card];
+    if (sku) {
+      skuList.push(sku + ' x' + qty);
+    }
+  }
+  
+  // Format: OrderID SKU1 x1 , SKU2 x2
+  const cleanOrderId = orderIdentifier.replace('#', '');
+  return cleanOrderId + ' ' + skuList.join(' , ');
+}
+
 // ============================================================
 // FORM SUBMISSION HANDLER
 // ============================================================
@@ -343,6 +379,10 @@ function processFormSubmission(data) {
     
     const formattedCards = formatCardsWithSeparator(allCards);
     
+    // ✅ NEW: Generate Sage Import string
+    const sageImportString = formatSageImport(shopifyOrderId, allCards);
+    Logger.log('📋 Sage Import String: ' + sageImportString);
+    
     // Cache detailed info
     const cache = CacheService.getScriptCache();
     const cacheKey = 'details_' + sheetName + '_' + rowId;
@@ -351,6 +391,7 @@ function processFormSubmission(data) {
     // Update Google Sheets
     sh.getRange(rowId, 17).setValue('Complete');
     sh.getRange(rowId, 18).setValue(formattedCards);
+    sh.getRange(rowId, 20).setValue(sageImportString); // ✅ NEW: Column T (20)
     
     // Add Golden Card to Shopify
     Logger.log('🛒 Adding Golden Card products to Shopify...');
@@ -367,7 +408,8 @@ function processFormSubmission(data) {
     return {
       success: true,
       cards: cards,
-      shopifyUpdate: addProductResult
+      shopifyUpdate: addProductResult,
+      sageImport: sageImportString // ✅ NEW: Return Sage Import string
     };
     
   } catch (error) {
